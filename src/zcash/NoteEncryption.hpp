@@ -1,3 +1,7 @@
+// Copyright (c) 2021-2024 The Pirate developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
 /*
 See the Zcash protocol specification for more information.
 https://github.com/zcash/zips/blob/master/protocol/protocol.pdf
@@ -33,22 +37,31 @@ protected:
     // Ephemeral secret key
     uint256 esk;
 
+    // Flags to prevent multiple encryptions
     bool already_encrypted_enc;
     bool already_encrypted_out;
 
-    SaplingNoteEncryption(uint256 epk, uint256 esk) : epk(epk), esk(esk), already_encrypted_enc(false), already_encrypted_out(false) {
+    // Constructor to initialize encryption keys
+    SaplingNoteEncryption(uint256 epk, uint256 esk)
+        : epk(epk), esk(esk), already_encrypted_enc(false), already_encrypted_out(false) {}
 
+    // Destructor to securely cleanse keys
+    ~SaplingNoteEncryption() {
+        memory_cleanse(epk.begin(), epk.size());
+        memory_cleanse(esk.begin(), esk.size());
     }
 
 public:
-
+    // Initialize note encryption from a diversifier
     static std::optional<SaplingNoteEncryption> FromDiversifier(diversifier_t d, uint256 esk);
 
+    // Encrypts plaintext for the recipient using their public key
     std::optional<SaplingEncCiphertext> encrypt_to_recipient(
         const uint256 &pk_d,
         const SaplingEncPlaintext &message
     );
 
+    // Encrypts plaintext for the sender's own viewing key
     SaplingOutCiphertext encrypt_to_ourselves(
         const uint256 &ovk,
         const uint256 &cv,
@@ -56,10 +69,12 @@ public:
         const SaplingOutPlaintext &message
     );
 
+    // Returns the ephemeral public key
     uint256 get_epk() const {
         return epk;
     }
 
+    // Returns the ephemeral secret key
     uint256 get_esk() const {
         return esk;
     }
@@ -75,7 +90,7 @@ std::optional<SaplingEncPlaintext> AttemptSaplingEncDecryption(
 
 // Attempts to decrypt a Sapling note using outgoing plaintext.
 // This will not check that the contents of the ciphertext are correct.
-std::optional<SaplingEncPlaintext> AttemptSaplingEncDecryption (
+std::optional<SaplingEncPlaintext> AttemptSaplingEncDecryption(
     const SaplingEncCiphertext &ciphertext,
     const uint256 &epk,
     const uint256 &esk,
@@ -92,10 +107,10 @@ std::optional<SaplingOutPlaintext> AttemptSaplingOutDecryption(
     const uint256 &epk
 );
 
-template<size_t MLEN>
+template <size_t MLEN>
 class NoteEncryption {
 protected:
-    enum { CLEN=MLEN+NOTEENCRYPTION_AUTH_BYTES };
+    enum { CLEN = MLEN + NOTEENCRYPTION_AUTH_BYTES };
     uint256 epk;
     uint256 esk;
     unsigned char nonce;
@@ -105,7 +120,14 @@ public:
     typedef std::array<unsigned char, CLEN> Ciphertext;
     typedef std::array<unsigned char, MLEN> Plaintext;
 
+    // Constructor to initialize NoteEncryption
     NoteEncryption(uint256 hSig);
+
+    // Destructor to securely cleanse keys
+    ~NoteEncryption() {
+        memory_cleanse(epk.begin(), epk.size());
+        memory_cleanse(esk.begin(), esk.size());
+    }
 
     // Gets the ephemeral secret key
     uint256 get_esk() {
@@ -121,8 +143,7 @@ public:
     // This is only called ZC_NUM_JS_OUTPUTS times for a given instantiation; 
     // but can be called 255 times before the nonce-space runs out.
     Ciphertext encrypt(const uint256 &pk_enc,
-                       const Plaintext &message
-                      );
+                       const Plaintext &message);
 
     // Creates a NoteEncryption private key
     static uint256 generate_privkey(const uint252 &a_sk);
@@ -131,10 +152,10 @@ public:
     static uint256 generate_pubkey(const uint256 &sk_enc);
 };
 
-template<size_t MLEN>
+template <size_t MLEN>
 class NoteDecryption {
 protected:
-    enum { CLEN=MLEN+NOTEENCRYPTION_AUTH_BYTES };
+    enum { CLEN = MLEN + NOTEENCRYPTION_AUTH_BYTES };
     uint256 sk_enc;
     uint256 pk_enc;
 
@@ -142,60 +163,64 @@ public:
     typedef std::array<unsigned char, CLEN> Ciphertext;
     typedef std::array<unsigned char, MLEN> Plaintext;
 
-    NoteDecryption() { }
+    NoteDecryption() {}
     NoteDecryption(uint256 sk_enc);
 
+    // Decrypts the given ciphertext
     Plaintext decrypt(const Ciphertext &ciphertext,
                       const uint256 &epk,
                       const uint256 &hSig,
-                      unsigned char nonce
-                     ) const;
+                      unsigned char nonce) const;
 
-    friend inline bool operator==(const NoteDecryption& a, const NoteDecryption& b) {
+    // Compare NoteDecryption objects
+    friend inline bool operator==(const NoteDecryption &a, const NoteDecryption &b) {
         return a.sk_enc == b.sk_enc && a.pk_enc == b.pk_enc;
     }
-    friend inline bool operator<(const NoteDecryption& a, const NoteDecryption& b) {
+    friend inline bool operator<(const NoteDecryption &a, const NoteDecryption &b) {
         return (a.sk_enc < b.sk_enc ||
                 (a.sk_enc == b.sk_enc && a.pk_enc < b.pk_enc));
     }
 };
 
+// Generate a random 256-bit number
 uint256 random_uint256();
+
+// Generate a random 252-bit number
 uint252 random_uint252();
 
 class note_decryption_failed : public std::runtime_error {
 public:
-    note_decryption_failed() : std::runtime_error("Could not decrypt message") { }
+    note_decryption_failed() : std::runtime_error("Could not decrypt message") {}
 };
 
-
-
 // Subclass PaymentDisclosureNoteDecryption provides a method to decrypt a note with esk.
-template<size_t MLEN>
+template <size_t MLEN>
 class PaymentDisclosureNoteDecryption : public NoteDecryption<MLEN> {
 protected:
 public:
-    enum { CLEN=MLEN+NOTEENCRYPTION_AUTH_BYTES };
+    enum { CLEN = MLEN + NOTEENCRYPTION_AUTH_BYTES };
     typedef std::array<unsigned char, CLEN> Ciphertext;
     typedef std::array<unsigned char, MLEN> Plaintext;
 
     PaymentDisclosureNoteDecryption() : NoteDecryption<MLEN>() {}
     PaymentDisclosureNoteDecryption(uint256 sk_enc) : NoteDecryption<MLEN>(sk_enc) {}
 
+    // Decrypts with esk
     Plaintext decryptWithEsk(
         const Ciphertext &ciphertext,
         const uint256 &pk_enc,
         const uint256 &esk,
         const uint256 &hSig,
-        unsigned char nonce
-        ) const;
+        unsigned char nonce) const;
 };
 
-}
+} // namespace libzcash
 
+// Typedefs for Zcash-specific encryption and decryption
 typedef libzcash::NoteEncryption<ZC_NOTEPLAINTEXT_SIZE> ZCNoteEncryption;
 typedef libzcash::NoteDecryption<ZC_NOTEPLAINTEXT_SIZE> ZCNoteDecryption;
 
 typedef libzcash::PaymentDisclosureNoteDecryption<ZC_NOTEPLAINTEXT_SIZE> ZCPaymentDisclosureNoteDecryption;
 
 #endif /* ZC_NOTE_ENCRYPTION_H_ */
+
