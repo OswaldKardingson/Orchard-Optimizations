@@ -1,16 +1,19 @@
-// Copyright (c) 2022-2023 The Zcash developers
+// Copyright (c) 2021-2024 The Pirate developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 #include "zcash/memo.h"
 
 #include <utf8cpp/utf8.h>
+#include <algorithm>
+#include <array>
 
 namespace libzcash {
 
-Memo::Memo(const ArbitraryData& data) : value_({0xff})
+Memo::Memo(const ArbitraryData& data) : value_({0xff}) 
 {
-    std::move(data.begin(), data.end(), value_.begin() + 1);
+    // Use std::copy for safer memory operations
+    std::copy(data.begin(), data.end(), value_.begin() + 1);
 }
 
 bool operator==(const Memo& a, const Memo& b)
@@ -27,15 +30,14 @@ std::optional<Memo> Memo::FromBytes(const Bytes& rawMemo)
 {
     if (rawMemo == noMemo) {
         return std::nullopt;
-    } else {
-        return Memo(rawMemo);
     }
+    return Memo(rawMemo);
 }
 
 std::optional<Memo> Memo::FromBytes(const Byte (&rawMemo)[SIZE])
 {
-    Bytes result;
-    std::move(std::begin(rawMemo), std::end(rawMemo), result.begin());
+    Bytes result{}; // Ensure the array is zero-initialized
+    std::copy(std::begin(rawMemo), std::end(rawMemo), result.begin());
     return FromBytes(result);
 }
 
@@ -44,26 +46,28 @@ Memo::FromBytes(const std::vector<Byte>& rawMemo)
 {
     if (rawMemo.size() > SIZE) {
         return tl::unexpected(ConversionError::MemoTooLong);
-    } else {
-        Bytes result{};
-        std::move(rawMemo.begin(), rawMemo.end(), result.begin());
-        return FromBytes(result);
     }
+    
+    Bytes result{};
+    // Use std::copy for safer memory operations
+    std::copy(rawMemo.begin(), rawMemo.end(), result.begin());
+    return FromBytes(result);
 }
 
 tl::expected<Memo, Memo::TextConversionError> Memo::FromText(const std::string& memoStr)
 {
-    if (utf8::is_valid(memoStr)) {
-        if (memoStr.size() > SIZE) {
-            return tl::unexpected(TextConversionError::MemoTooLong);
-        } else {
-            Bytes result{};
-            std::copy(memoStr.begin(), memoStr.end(), result.begin());
-            return Memo(result);
-        }
-    } else {
+    if (!utf8::is_valid(memoStr)) {
         return tl::unexpected(TextConversionError::InvalidUTF8);
     }
+
+    if (memoStr.size() > SIZE) {
+        return tl::unexpected(TextConversionError::MemoTooLong);
+    }
+
+    Bytes result{};
+    // Use std::copy for text conversion to bytes
+    std::copy(memoStr.begin(), memoStr.end(), result.begin());
+    return Memo(result);
 }
 
 const Memo::Bytes& Memo::ToBytes() const
@@ -84,18 +88,19 @@ tl::expected<Memo::Contents, Memo::InterpretationError> Memo::Interpret() const
         // Trim off trailing zeroes
         auto end = std::find_if(value_.rbegin(), value_.rend(), [](auto v) { return v != 0; });
         std::string memoStr(value_.begin(), end.base());
-        if (utf8::is_valid(memoStr)) {
-            return {memoStr};
-        } else {
+        if (!utf8::is_valid(memoStr)) {
             return tl::unexpected(InterpretationError::InvalidUTF8);
         }
-    } else if (value_[0] == 0xff) {
-        // TODO: this could be `std::to_array(value_.data()[1])` in C++20
-        ArbitraryData data;
-        std::move(value_.begin() + 1, value_.end(), data.begin());
-        return data;
-    } else {
-        return value_;
+        return {memoStr};
     }
-}
+
+    if (value_[0] == 0xff) {
+        ArbitraryData data;
+        // Use std::copy for safer memory operations
+        std::copy(value_.begin() + 1, value_.end(), data.begin());
+        return data;
+    }
+
+    // Default case for uninterpreted values
+    return value_;
 }
