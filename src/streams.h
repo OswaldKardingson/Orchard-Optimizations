@@ -1,5 +1,6 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2013 The Bitcoin Core developers
+// Copyright (c) 2021-2024 The Pirate developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -33,7 +34,6 @@
 #include <set>
 #include <stdint.h>
 #include <stdio.h>
-#include <string.h>
 #include <string>
 #include <utility>
 #include <vector>
@@ -49,22 +49,22 @@ class RustStream
 public:
     RustStream(Stream& stream_) : stream(&stream_) {}
 
-    static long read_callback(void* context, unsigned char* pch, size_t nSize)
+    static long read_callback(void* context, std::vector<unsigned char>& buffer, size_t nSize)
     {
         return reinterpret_cast<RustStream*>(context)->read(
-            reinterpret_cast<char*>(pch), nSize);
+            reinterpret_cast<std::vector<char>&>(buffer), nSize);
     }
 
-    static long write_callback(void* context, const unsigned char* pch, size_t nSize)
+    static long write_callback(void* context, const std::vector<unsigned char>& buffer, size_t nSize)
     {
         return reinterpret_cast<RustStream*>(context)->write(
-            reinterpret_cast<const char*>(pch), nSize);
+            reinterpret_cast<const std::vector<char>&>(buffer), nSize);
     }
 
-    long read(char* pch, size_t nSize)
+    long read(std::vector<char>& buffer, size_t nSize)
     {
         try {
-            stream->read(pch, nSize);
+            stream->read(buffer.data(), nSize);
             return nSize;
         } catch (std::ios_base::failure e) {
             // TODO: log
@@ -72,10 +72,10 @@ public:
         }
     }
 
-    long write(const char* pch, size_t nSize)
+    long write(const std::vector<char>& buffer, size_t nSize)
     {
         try {
-            stream->write(pch, nSize);
+            stream->write(buffer.data(), nSize);
             return nSize;
         } catch (std::ios_base::failure e) {
             // TODO: log
@@ -93,7 +93,8 @@ class OverrideStream
     const int nVersion;
 
 public:
-    OverrideStream(Stream* stream_, int nType_, int nVersion_) : stream(stream_), nType(nType_), nVersion(nVersion_) {}
+    OverrideStream(Stream* stream_, int nType_, int nVersion_)
+        : stream(stream_), nType(nType_), nVersion(nVersion_) {}
 
     template <typename T>
     OverrideStream<Stream>& operator<<(const T& obj)
@@ -113,12 +114,20 @@ public:
 
     void write(const char* pch, size_t nSize)
     {
-        stream->write(pch, nSize);
+        if (pch != nullptr && nSize > 0) {
+            stream->write(pch, nSize);
+        } else {
+            throw std::ios_base::failure("OverrideStream::write(): Invalid write operation.");
+        }
     }
 
     void read(char* pch, size_t nSize)
     {
-        stream->read(pch, nSize);
+        if (pch != nullptr && nSize > 0) {
+            stream->read(pch, nSize);
+        } else {
+            throw std::ios_base::failure("OverrideStream::read(): Invalid read operation.");
+        }
     }
 
     int GetVersion() const { return nVersion; }
@@ -144,35 +153,51 @@ public:
      * @param[in]  nTypeIn Serialization Type
      * @param[in]  nVersionIn Serialization Version (including any flags)
      * @param[in]  vchDataIn  Referenced byte vector to overwrite/append
-     * @param[in]  nPosIn Starting position. Vector index where writes should start. The vector will initially
-     *                    grow as necessary to max(nPosIn, vec.size()). So to append, use vec.size().
+     * @param[in]  nPosIn Starting position. Vector index where writes should start.
+     *                    The vector will initially grow as necessary to max(nPosIn, vec.size()).
+     *                    So to append, use vec.size().
      */
-    CVectorWriter(int nTypeIn, int nVersionIn, std::vector<unsigned char>& vchDataIn, size_t nPosIn) : nType(nTypeIn), nVersion(nVersionIn), vchData(vchDataIn), nPos(nPosIn)
+    CVectorWriter(int nTypeIn, int nVersionIn, std::vector<unsigned char>& vchDataIn, size_t nPosIn)
+        : nType(nTypeIn), nVersion(nVersionIn), vchData(vchDataIn), nPos(nPosIn)
     {
-        if (nPos > vchData.size())
-            vchData.resize(nPos);
+        if (nPos > vchData.size()) {
+            vchData.resize(nPos); // Pre-allocate memory if needed
+        }
     }
+
     /*
      * (other params same as above)
      * @param[in]  args  A list of items to serialize starting at nPosIn.
      */
     template <typename... Args>
-    CVectorWriter(int nTypeIn, int nVersionIn, std::vector<unsigned char>& vchDataIn, size_t nPosIn, Args&&... args) : CVectorWriter(nTypeIn, nVersionIn, vchDataIn, nPosIn)
+    CVectorWriter(int nTypeIn, int nVersionIn, std::vector<unsigned char>& vchDataIn, size_t nPosIn, Args&&... args)
+        : CVectorWriter(nTypeIn, nVersionIn, vchDataIn, nPosIn)
     {
         ::SerializeMany(*this, std::forward<Args>(args)...);
     }
+
     void write(const char* pch, size_t nSize)
     {
+        if (pch == nullptr || nSize == 0) {
+            throw std::ios_base::failure("CVectorWriter::write(): Invalid write operation.");
+        }
+
+        // Ensure sufficient capacity
+        if (nPos + nSize > vchData.capacity()) {
+            vchData.reserve(nPos + nSize);
+        }
+
         assert(nPos <= vchData.size());
         size_t nOverwrite = std::min(nSize, vchData.size() - nPos);
         if (nOverwrite) {
-            memcpy(vchData.data() + nPos, reinterpret_cast<const unsigned char*>(pch), nOverwrite);
+            std::copy(pch, pch + nOverwrite, vchData.begin() + nPos);
         }
         if (nOverwrite < nSize) {
-            vchData.insert(vchData.end(), reinterpret_cast<const unsigned char*>(pch) + nOverwrite, reinterpret_cast<const unsigned char*>(pch) + nSize);
+            vchData.insert(vchData.end(), pch + nOverwrite, pch + nSize);
         }
         nPos += nSize;
     }
+
     template <typename T>
     CVectorWriter& operator<<(const T& obj)
     {
@@ -180,14 +205,9 @@ public:
         ::Serialize(*this, obj);
         return (*this);
     }
-    int GetVersion() const
-    {
-        return nVersion;
-    }
-    int GetType() const
-    {
-        return nType;
-    }
+
+    int GetVersion() const { return nVersion; }
+    int GetType() const { return nType; }
 
 private:
     const int nType;
@@ -196,8 +216,8 @@ private:
     size_t nPos;
 };
 
-
-/** Double ended buffer combining vector and stream-like interfaces.
+/**
+ * Double-ended buffer combining vector and stream-like interfaces.
  *
  * >> and << read and write unformatted data using the above serialization templates.
  * Fills with data in linear time; some stringstream implementations take N^2 time.
@@ -206,7 +226,7 @@ template <typename SerializeType>
 class CBaseDataStream
 {
 protected:
-    typedef SerializeType vector_type;
+    using vector_type = SerializeType;
     vector_type vch;
     unsigned int nReadPos;
 
@@ -214,48 +234,42 @@ protected:
     int nVersion;
 
 public:
-    typedef typename vector_type::allocator_type allocator_type;
-    typedef typename vector_type::size_type size_type;
-    typedef typename vector_type::difference_type difference_type;
-    typedef typename vector_type::reference reference;
-    typedef typename vector_type::const_reference const_reference;
-    typedef typename vector_type::value_type value_type;
-    typedef typename vector_type::iterator iterator;
-    typedef typename vector_type::const_iterator const_iterator;
-    typedef typename vector_type::reverse_iterator reverse_iterator;
+    using allocator_type = typename vector_type::allocator_type;
+    using size_type = typename vector_type::size_type;
+    using difference_type = typename vector_type::difference_type;
+    using reference = typename vector_type::reference;
+    using const_reference = typename vector_type::const_reference;
+    using value_type = typename vector_type::value_type;
+    using iterator = typename vector_type::iterator;
+    using const_iterator = typename vector_type::const_iterator;
+    using reverse_iterator = typename vector_type::reverse_iterator;
 
     explicit CBaseDataStream(int nTypeIn, int nVersionIn)
     {
         Init(nTypeIn, nVersionIn);
     }
 
-    CBaseDataStream(const_iterator pbegin, const_iterator pend, int nTypeIn, int nVersionIn) : vch(pbegin, pend)
+    CBaseDataStream(const_iterator pbegin, const_iterator pend, int nTypeIn, int nVersionIn)
+        : vch(pbegin, pend)
     {
         Init(nTypeIn, nVersionIn);
     }
 
-    CBaseDataStream(const char* pbegin, const char* pend, int nTypeIn, int nVersionIn) : vch(pbegin, pend)
+    CBaseDataStream(const char* pbegin, const char* pend, int nTypeIn, int nVersionIn)
+        : vch(pbegin, pend)
     {
         Init(nTypeIn, nVersionIn);
     }
 
-    CBaseDataStream(const vector_type& vchIn, int nTypeIn, int nVersionIn) : vch(vchIn.begin(), vchIn.end())
-    {
-        Init(nTypeIn, nVersionIn);
-    }
-
-    CBaseDataStream(const std::vector<char>& vchIn, int nTypeIn, int nVersionIn) : vch(vchIn.begin(), vchIn.end())
-    {
-        Init(nTypeIn, nVersionIn);
-    }
-
-    CBaseDataStream(const std::vector<unsigned char>& vchIn, int nTypeIn, int nVersionIn) : vch(vchIn.begin(), vchIn.end())
+    CBaseDataStream(const vector_type& vchIn, int nTypeIn, int nVersionIn)
+        : vch(vchIn.begin(), vchIn.end())
     {
         Init(nTypeIn, nVersionIn);
     }
 
     template <size_t _N>
-    CBaseDataStream(const std::array<unsigned char, _N>& vchIn, int nTypeIn, int nVersionIn) : vch(vchIn.begin(), vchIn.end())
+    CBaseDataStream(const std::array<unsigned char, _N>& vchIn, int nTypeIn, int nVersionIn)
+        : vch(vchIn.begin(), vchIn.end())
     {
         Init(nTypeIn, nVersionIn);
     }
@@ -272,6 +286,9 @@ public:
         nReadPos = 0;
         nType = nTypeIn;
         nVersion = nVersionIn;
+
+        // Pre-allocate memory to minimize resizing during operations
+        vch.reserve(1024); // Example pre-allocation for typical usage
     }
 
     CBaseDataStream& operator+=(const CBaseDataStream& b)
@@ -284,14 +301,13 @@ public:
     {
         CBaseDataStream ret = a;
         ret += b;
-        return (ret);
+        return ret;
     }
 
     std::string str() const
     {
-        return (std::string(begin(), end()));
+        return std::string(begin(), end());
     }
-
 
     //
     // Vector subset
@@ -302,8 +318,14 @@ public:
     iterator end() { return vch.end(); }
     size_type size() const { return vch.size() - nReadPos; }
     bool empty() const { return vch.size() == nReadPos; }
-    void resize(size_type n, value_type c = 0) { vch.resize(n + nReadPos, c); }
-    void reserve(size_type n) { vch.reserve(n + nReadPos); }
+    void resize(size_type n, value_type c = 0)
+    {
+        vch.resize(n + nReadPos, c);
+    }
+    void reserve(size_type n)
+    {
+        vch.reserve(n + nReadPos);
+    }
     const_reference operator[](size_type pos) const { return vch[pos + nReadPos]; }
     reference operator[](size_type pos) { return vch[pos + nReadPos]; }
     void clear()
@@ -311,57 +333,54 @@ public:
         vch.clear();
         nReadPos = 0;
     }
-    iterator insert(iterator it, const char& x = char()) { return vch.insert(it, x); }
-    void insert(iterator it, size_type n, const char& x) { vch.insert(it, n, x); }
-    value_type* data() { return vch.data() + nReadPos; }
-    const value_type* data() const { return vch.data() + nReadPos; }
 
-    void insert(iterator it, std::vector<char>::const_iterator first, std::vector<char>::const_iterator last)
+    iterator insert(iterator it, const char& x = char())
     {
-        if (last == first)
-            return;
-        assert(last - first > 0);
-        if (it == vch.begin() + nReadPos && (unsigned int)(last - first) <= nReadPos) {
-            // special case for inserting at the front when there's room
-            nReadPos -= (last - first);
-            memcpy(&vch[nReadPos], &first[0], last - first);
-        } else
-            vch.insert(it, first, last);
+        return vch.insert(it, x);
     }
 
-#if !defined(_MSC_VER) || _MSC_VER >= 1300
+    void insert(iterator it, size_type n, const char& x)
+    {
+        vch.insert(it, n, x);
+    }
+
+    value_type* data() { return vch.data() + nReadPos; }
+    const value_type* data() const { return vch.data() + nReadPos; }
+};
+
     void insert(iterator it, const char* first, const char* last)
     {
         if (last == first)
             return;
         assert(last - first > 0);
-        if (it == vch.begin() + nReadPos && (unsigned int)(last - first) <= nReadPos) {
-            // special case for inserting at the front when there's room
+        if (it == vch.begin() + nReadPos && static_cast<size_type>(last - first) <= nReadPos) {
+            // Special case for inserting at the front when there's room
             nReadPos -= (last - first);
-            memcpy(&vch[nReadPos], &first[0], last - first);
-        } else
+            std::copy(first, last, &vch[nReadPos]);
+        } else {
             vch.insert(it, first, last);
+        }
     }
-#endif
 
     iterator erase(iterator it)
     {
         if (it == vch.begin() + nReadPos) {
-            // special case for erasing from the front
+            // Special case for erasing from the front
             if (++nReadPos >= vch.size()) {
-                // whenever we reach the end, we take the opportunity to clear the buffer
+                // Whenever we reach the end, we take the opportunity to clear the buffer
                 nReadPos = 0;
                 return vch.erase(vch.begin(), vch.end());
             }
             return vch.begin() + nReadPos;
-        } else
+        } else {
             return vch.erase(it);
+        }
     }
 
     iterator erase(iterator first, iterator last)
     {
         if (first == vch.begin() + nReadPos) {
-            // special case for erasing from the front
+            // Special case for erasing from the front
             if (last == vch.end()) {
                 nReadPos = 0;
                 return vch.erase(vch.begin(), vch.end());
@@ -369,14 +388,18 @@ public:
                 nReadPos = (last - vch.begin());
                 return last;
             }
-        } else
+        } else {
             return vch.erase(first, last);
+        }
     }
 
     inline void Compact()
     {
-        vch.erase(vch.begin(), vch.begin() + nReadPos);
-        nReadPos = 0;
+        if (nReadPos > 0) {
+            // Only compact if necessary
+            vch.erase(vch.begin(), vch.begin() + nReadPos);
+            nReadPos = 0;
+        }
     }
 
     bool Rewind(size_type n)
@@ -387,7 +410,6 @@ public:
         nReadPos -= n;
         return true;
     }
-
 
     //
     // Stream subset
@@ -401,11 +423,6 @@ public:
     void SetVersion(int n) { nVersion = n; }
     int GetVersion() const { return nVersion; }
 
-    void read_u8(unsigned char* pch, size_t nSize)
-    {
-        read(reinterpret_cast<char*>(pch), nSize);
-    }
-
     void read(char* pch, size_t nSize)
     {
         if (nSize == 0)
@@ -416,54 +433,36 @@ public:
         }
 
         // Read from the beginning of the buffer
-        unsigned int nReadPosNext = nReadPos + nSize;
-        if (nReadPosNext >= vch.size()) {
-            if (nReadPosNext > vch.size()) {
-                throw std::ios_base::failure("CBaseDataStream::read(): end of data");
-            }
-            memcpy(pch, &vch[nReadPos], nSize);
-            nReadPos = 0;
-            vch.clear();
-            return;
+        size_type nReadPosNext = nReadPos + nSize;
+        if (nReadPosNext > vch.size()) {
+            throw std::ios_base::failure("CBaseDataStream::read(): end of data");
         }
-        memcpy(pch, &vch[nReadPos], nSize);
+        std::copy(vch.begin() + nReadPos, vch.begin() + nReadPosNext, pch);
         nReadPos = nReadPosNext;
     }
 
     void ignore(int nSize)
     {
-        // Ignore from the beginning of the buffer
         if (nSize < 0) {
-            throw std::ios_base::failure("CDataStream::ignore(): nSize negative");
+            throw std::ios_base::failure("CBaseDataStream::ignore(): nSize negative");
         }
-        unsigned int nReadPosNext = nReadPos + nSize;
-        if (nReadPosNext >= vch.size()) {
-            if (nReadPosNext > vch.size())
-                throw std::ios_base::failure("CBaseDataStream::ignore(): end of data");
-            nReadPos = 0;
-            vch.clear();
-            return;
+
+        // Ignore from the beginning of the buffer
+        size_type nReadPosNext = nReadPos + nSize;
+        if (nReadPosNext > vch.size()) {
+            throw std::ios_base::failure("CBaseDataStream::ignore(): end of data");
         }
         nReadPos = nReadPosNext;
     }
 
-    void write_u8(const unsigned char* pch, size_t nSize)
-    {
-        write(reinterpret_cast<const char*>(pch), nSize);
-    }
-
     void write(const char* pch, size_t nSize)
     {
+        if (pch == nullptr || nSize == 0) {
+            throw std::ios_base::failure("CBaseDataStream::write(): Invalid write operation");
+        }
+
         // Write to the end of the buffer
         vch.insert(vch.end(), pch, pch + nSize);
-    }
-
-    template <typename Stream>
-    void Serialize(Stream& s) const
-    {
-        // Special case: stream << stream concatenates like stream += stream
-        if (!vch.empty())
-            s.write((char*)&vch[0], vch.size() * sizeof(vch[0]));
     }
 
     template <typename T>
@@ -471,7 +470,7 @@ public:
     {
         // Serialize to this stream
         ::Serialize(*this, obj);
-        return (*this);
+        return *this;
     }
 
     template <typename T>
@@ -479,11 +478,13 @@ public:
     {
         // Unserialize from this stream
         ::Unserialize(*this, obj);
-        return (*this);
+        return *this;
     }
+};
 
     void GetAndClear(CSerializeData& d)
     {
+        // Move data to the provided container and clear the internal buffer
         d.insert(d.end(), begin(), end());
         clear();
     }
@@ -492,29 +493,25 @@ public:
 class CDataStream : public CBaseDataStream<CSerializeData>
 {
 public:
-    explicit CDataStream(int nTypeIn, int nVersionIn) : CBaseDataStream(nTypeIn, nVersionIn) {}
+    explicit CDataStream(int nTypeIn, int nVersionIn)
+        : CBaseDataStream(nTypeIn, nVersionIn) {}
 
-    CDataStream(const_iterator pbegin, const_iterator pend, int nTypeIn, int nVersionIn) : CBaseDataStream(pbegin, pend, nTypeIn, nVersionIn) {}
+    CDataStream(const_iterator pbegin, const_iterator pend, int nTypeIn, int nVersionIn)
+        : CBaseDataStream(pbegin, pend, nTypeIn, nVersionIn) {}
 
-#if !defined(_MSC_VER) || _MSC_VER >= 1300
-    CDataStream(const char* pbegin, const char* pend, int nTypeIn, int nVersionIn) : CBaseDataStream(pbegin, pend, nTypeIn, nVersionIn) {}
-#endif
+    CDataStream(const char* pbegin, const char* pend, int nTypeIn, int nVersionIn)
+        : CBaseDataStream(pbegin, pend, nTypeIn, nVersionIn) {}
 
-    CDataStream(const vector_type& vchIn, int nTypeIn, int nVersionIn) : CBaseDataStream(vchIn, nTypeIn, nVersionIn) {}
-
-    CDataStream(const std::vector<char>& vchIn, int nTypeIn, int nVersionIn) : CBaseDataStream(vchIn, nTypeIn, nVersionIn) {}
-
-    CDataStream(const std::vector<unsigned char>& vchIn, int nTypeIn, int nVersionIn) : CBaseDataStream(vchIn, nTypeIn, nVersionIn) {}
+    CDataStream(const vector_type& vchIn, int nTypeIn, int nVersionIn)
+        : CBaseDataStream(vchIn, nTypeIn, nVersionIn) {}
 
     template <size_t _N>
-    CDataStream(const std::array<unsigned char, _N>& vchIn, int nTypeIn, int nVersionIn) : CBaseDataStream(vchIn, nTypeIn, nVersionIn)
-    {
-    }
+    CDataStream(const std::array<unsigned char, _N>& vchIn, int nTypeIn, int nVersionIn)
+        : CBaseDataStream(vchIn, nTypeIn, nVersionIn) {}
 
     template <typename... Args>
-    CDataStream(int nTypeIn, int nVersionIn, Args&&... args) : CBaseDataStream(nTypeIn, nVersionIn, args...)
-    {
-    }
+    CDataStream(int nTypeIn, int nVersionIn, Args&&... args)
+        : CBaseDataStream(nTypeIn, nVersionIn, args...) {}
 };
 
 /**
@@ -529,16 +526,18 @@ typedef std::vector<unsigned char, secure_allocator<unsigned char>> CKeyingMater
 class CSecureDataStream : public CBaseDataStream<CKeyingMaterial>
 {
 public:
-    explicit CSecureDataStream(int nTypeIn, int nVersionIn) : CBaseDataStream(nTypeIn, nVersionIn) {}
+    explicit CSecureDataStream(int nTypeIn, int nVersionIn)
+        : CBaseDataStream(nTypeIn, nVersionIn) {}
 
-    CSecureDataStream(const_iterator pbegin, const_iterator pend, int nTypeIn, int nVersionIn) : CBaseDataStream(pbegin, pend, nTypeIn, nVersionIn) {}
+    CSecureDataStream(const_iterator pbegin, const_iterator pend, int nTypeIn, int nVersionIn)
+        : CBaseDataStream(pbegin, pend, nTypeIn, nVersionIn) {}
 
-    CSecureDataStream(const vector_type& vchIn, int nTypeIn, int nVersionIn) : CBaseDataStream(vchIn, nTypeIn, nVersionIn) {}
+    CSecureDataStream(const vector_type& vchIn, int nTypeIn, int nVersionIn)
+        : CBaseDataStream(vchIn, nTypeIn, nVersionIn) {}
 
     template <size_t _N>
-    CSecureDataStream(const std::array<unsigned char, _N>& vchIn, int nTypeIn, int nVersionIn) : CBaseDataStream(vchIn, nTypeIn, nVersionIn)
-    {
-    }
+    CSecureDataStream(const std::array<unsigned char, _N>& vchIn, int nTypeIn, int nVersionIn)
+        : CBaseDataStream(vchIn, nTypeIn, nVersionIn) {}
 };
 
 /**
@@ -547,7 +546,6 @@ public:
  * TODO: Rename this to RustStream once the non-`cxx` usages have been migrated to `cxx`.
  */
 typedef CBaseDataStream<CKeyingMaterial> SecureRustDataStream;
-
 
 /** Non-refcounted RAII wrapper for FILE*
  *
@@ -559,8 +557,8 @@ class CAutoFile
 {
 private:
     // Disallow copies
-    CAutoFile(const CAutoFile&);
-    CAutoFile& operator=(const CAutoFile&);
+    CAutoFile(const CAutoFile&) = delete;
+    CAutoFile& operator=(const CAutoFile&) = delete;
 
     const int nType;
     const int nVersion;
@@ -568,10 +566,8 @@ private:
     FILE* file;
 
 public:
-    CAutoFile(FILE* filenew, int nTypeIn, int nVersionIn) : nType(nTypeIn), nVersion(nVersionIn)
-    {
-        file = filenew;
-    }
+    CAutoFile(FILE* filenew, int nTypeIn, int nVersionIn)
+        : nType(nTypeIn), nVersion(nVersionIn), file(filenew) {}
 
     ~CAutoFile()
     {
@@ -582,7 +578,7 @@ public:
     {
         if (file) {
             ::fclose(file);
-            file = NULL;
+            file = nullptr;
         }
     }
 
@@ -593,7 +589,7 @@ public:
     FILE* release()
     {
         FILE* ret = file;
-        file = NULL;
+        file = nullptr;
         return ret;
     }
 
@@ -605,18 +601,13 @@ public:
 
     /** Return true if the wrapped FILE* is NULL, false otherwise.
      */
-    bool IsNull() const { return (file == NULL); }
+    bool IsNull() const { return (file == nullptr); }
 
     //
     // Stream subset
     //
     int GetType() const { return nType; }
     int GetVersion() const { return nVersion; }
-
-    void read_u8(unsigned char* pch, size_t nSize)
-    {
-        read(reinterpret_cast<char*>(pch), nSize);
-    }
 
     void read(char* pch, size_t nSize)
     {
@@ -626,24 +617,6 @@ public:
             throw std::ios_base::failure(feof(file) ? "CAutoFile::read: end of file" : "CAutoFile::read: fread failed");
     }
 
-    void ignore(size_t nSize)
-    {
-        if (!file)
-            throw std::ios_base::failure("CAutoFile::ignore: file handle is NULL");
-        unsigned char data[4096];
-        while (nSize > 0) {
-            size_t nNow = std::min<size_t>(nSize, sizeof(data));
-            if (fread(data, 1, nNow, file) != nNow)
-                throw std::ios_base::failure(feof(file) ? "CAutoFile::ignore: end of file" : "CAutoFile::read: fread failed");
-            nSize -= nNow;
-        }
-    }
-
-    void write_u8(const unsigned char* pch, size_t nSize)
-    {
-        write(reinterpret_cast<const char*>(pch), nSize);
-    }
-
     void write(const char* pch, size_t nSize)
     {
         if (!file)
@@ -651,25 +624,43 @@ public:
         if (fwrite(pch, 1, nSize, file) != nSize)
             throw std::ios_base::failure("CAutoFile::write: write failed");
     }
+};
+
+    void ignore(size_t nSize)
+    {
+        if (!file)
+            throw std::ios_base::failure("CAutoFile::ignore: file handle is NULL");
+        unsigned char data[4096];
+        while (nSize > 0) {
+            size_t nNow = std::min<size_t>(nSize, sizeof(data));
+            if (fread(data, 1, nNow, file) != nNow) {
+                throw std::ios_base::failure(feof(file) ? "CAutoFile::ignore: end of file"
+                                                        : "CAutoFile::ignore: fread failed");
+            }
+            nSize -= nNow;
+        }
+    }
 
     template <typename T>
     CAutoFile& operator<<(const T& obj)
     {
-        // Serialize to this stream
         if (!file)
             throw std::ios_base::failure("CAutoFile::operator<<: file handle is NULL");
+
+        // Serialize to this stream
         ::Serialize(*this, obj);
-        return (*this);
+        return *this;
     }
 
     template <typename T>
     CAutoFile& operator>>(T& obj)
     {
-        // Unserialize from this stream
         if (!file)
             throw std::ios_base::failure("CAutoFile::operator>>: file handle is NULL");
+
+        // Unserialize from this stream
         ::Unserialize(*this, obj);
-        return (*this);
+        return *this;
     }
 };
 
@@ -683,8 +674,8 @@ class CBufferedFile
 {
 private:
     // Disallow copies
-    CBufferedFile(const CBufferedFile&);
-    CBufferedFile& operator=(const CBufferedFile&);
+    CBufferedFile(const CBufferedFile&) = delete;
+    CBufferedFile& operator=(const CBufferedFile&) = delete;
 
     const int nType;
     const int nVersion;
@@ -697,29 +688,36 @@ private:
     std::vector<char> vchBuf; // the buffer
 
 protected:
-    // read data from the source to fill the buffer
+    // Read data from the source to fill the buffer
     bool Fill()
     {
-        unsigned int pos = nSrcPos % vchBuf.size();
-        unsigned int readNow = vchBuf.size() - pos;
-        unsigned int nAvail = vchBuf.size() - (nSrcPos - nReadPos) - nRewind;
+        size_t pos = nSrcPos % vchBuf.size();
+        size_t readNow = vchBuf.size() - pos;
+        size_t nAvail = vchBuf.size() - (nSrcPos - nReadPos) - nRewind;
+
         if (nAvail < readNow)
             readNow = nAvail;
         if (readNow == 0)
             return false;
+
         size_t nBytes = fread((void*)&vchBuf[pos], 1, readNow, src);
         if (nBytes == 0) {
-            throw std::ios_base::failure(feof(src) ? "CBufferedFile::Fill: end of file" : "CBufferedFile::Fill: fread failed");
+            throw std::ios_base::failure(feof(src) ? "CBufferedFile::Fill: end of file"
+                                                   : "CBufferedFile::Fill: fread failed");
         }
+
         nSrcPos += nBytes;
         return true;
     }
 
 public:
-    CBufferedFile(FILE* fileIn, uint64_t nBufSize, uint64_t nRewindIn, int nTypeIn, int nVersionIn) : nType(nTypeIn), nVersion(nVersionIn), nSrcPos(0), nReadPos(0), nReadLimit((uint64_t)(-1)), nRewind(nRewindIn), vchBuf(nBufSize, 0)
+    CBufferedFile(FILE* fileIn, uint64_t nBufSize, uint64_t nRewindIn, int nTypeIn, int nVersionIn)
+        : nType(nTypeIn), nVersion(nVersionIn), nSrcPos(0), nReadPos(0),
+          nReadLimit(static_cast<uint64_t>(-1)), nRewind(nRewindIn), vchBuf(nBufSize, 0)
     {
         if (nRewindIn >= nBufSize)
-            throw std::ios_base::failure("Rewind limit must be less than buffer size");
+            throw std::ios_base::failure("CBufferedFile: Rewind limit must be less than buffer size");
+
         src = fileIn;
     }
 
@@ -728,29 +726,19 @@ public:
         fclose();
     }
 
-    int GetVersion() const { return nVersion; }
-    int GetType() const { return nType; }
-
     void fclose()
     {
         if (src) {
             ::fclose(src);
-            src = NULL;
+            src = nullptr;
         }
     }
 
-    // check whether we're at the end of the source file
     bool eof() const
     {
         return nReadPos == nSrcPos && feof(src);
     }
 
-    void read_u8(unsigned char* pch, size_t nSize)
-    {
-        read(reinterpret_cast<char*>(pch), nSize);
-    }
-
-    // read a number of bytes
     void read(char* pch, size_t nSize)
     {
         if (nSize == 0)
@@ -760,41 +748,48 @@ public:
             throw std::ios_base::failure("CBufferedFile::read(): cannot read from null pointer");
         }
 
-        if (nSize + nReadPos > nReadLimit)
-            throw std::ios_base::failure("Read attempted past buffer limit");
+        if (nSize + nReadPos > nReadLimit) {
+            throw std::ios_base::failure("CBufferedFile::read(): Read attempted past buffer limit");
+        }
+
         while (nSize > 0) {
             if (nReadPos == nSrcPos)
                 Fill();
-            unsigned int pos = nReadPos % vchBuf.size();
+
+            size_t pos = nReadPos % vchBuf.size();
             size_t nNow = nSize;
+
             if (nNow + pos > vchBuf.size())
                 nNow = vchBuf.size() - pos;
             if (nNow + nReadPos > nSrcPos)
                 nNow = nSrcPos - nReadPos;
-            memcpy(pch, &vchBuf[pos], nNow);
+
+            std::copy(&vchBuf[pos], &vchBuf[pos + nNow], pch);
+
             nReadPos += nNow;
             pch += nNow;
             nSize -= nNow;
         }
     }
+};
 
-    // return the current reading position
-    uint64_t GetPos()
+    // Return the current reading position
+    uint64_t GetPos() const
     {
         return nReadPos;
     }
 
-    // rewind to a given reading position
+    // Rewind to a given reading position
     bool SetPos(uint64_t nPos)
     {
         size_t bufsize = vchBuf.size();
         if (nPos + bufsize < nSrcPos) {
-            // rewinding too far, rewind as far as possible
+            // Rewinding too far, rewind as far as possible
             nReadPos = nSrcPos - bufsize;
             return false;
         }
         if (nPos > nSrcPos) {
-            // can't go this far forward, go as far as possible
+            // Can't go this far forward, go as far as possible
             nReadPos = nSrcPos;
             return false;
         }
@@ -805,22 +800,27 @@ public:
     bool Seek(uint64_t nPos)
     {
         long nLongPos = nPos;
-        if (nPos != (uint64_t)nLongPos)
+        if (nPos != static_cast<uint64_t>(nLongPos)) {
             return false;
-        if (fseek(src, nLongPos, SEEK_SET))
+        }
+        if (fseek(src, nLongPos, SEEK_SET) != 0) {
             return false;
-        nLongPos = ftell(src);
-        nSrcPos = nLongPos;
-        nReadPos = nLongPos;
+        }
+        long nNewPos = ftell(src);
+        if (nNewPos < 0) {
+            return false;
+        }
+        nSrcPos = nNewPos;
+        nReadPos = nNewPos;
         return true;
     }
 
-    // prevent reading beyond a certain position
-    // no argument removes the limit
-    bool SetLimit(uint64_t nPos = (uint64_t)(-1))
+    // Prevent reading beyond a certain position
+    bool SetLimit(uint64_t nPos = static_cast<uint64_t>(-1))
     {
-        if (nPos < nReadPos)
+        if (nPos < nReadPos) {
             return false;
+        }
         nReadLimit = nPos;
         return true;
     }
@@ -830,10 +830,10 @@ public:
     {
         // Unserialize from this stream
         ::Unserialize(*this, obj);
-        return (*this);
+        return *this;
     }
 
-    // search for a given byte in the stream, and remain positioned on it
+    // Search for a given byte in the stream, and remain positioned on it
     void FindByte(char ch)
     {
         while (true) {
@@ -845,5 +845,4 @@ public:
         }
     }
 };
-
 #endif // BITCOIN_STREAMS_H
