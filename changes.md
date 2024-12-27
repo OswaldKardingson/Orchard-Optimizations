@@ -20,7 +20,7 @@
 ## 2. Improved Documentaion
 - **Change**: Added and improved on existing documentation of key methods
 
-# Changes to `pirate_note_encryption.cpp`
+# Changes to `NoteEncryption.cpp`
 
 ## 1. Added Secure Memory Cleansing
 - **Change**: Added `memory_cleanse` calls to securely erase sensitive data (e.g., symmetric keys, shared secrets) after use to prevent residual memory leaks.
