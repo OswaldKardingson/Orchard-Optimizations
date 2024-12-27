@@ -1,4 +1,5 @@
 // Copyright (c) 2022-2023 The Zcash developers
+// Copyright (c) 2021-2024 The Pirate developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -6,7 +7,6 @@
 #define ZCASH_ZCASH_MEMO_H
 
 #include <tl/expected.hpp>
-
 #include <array>
 #include <optional>
 #include <string>
@@ -19,75 +19,64 @@ namespace libzcash
 /// Memos are described in the Zcash Protocol Specification §§ 3.2.1 & 5.5 and ZIP 302.
 ///
 /// Memos are generally wrapped in `std::optional` with the special “no memo” byte string of
-/// `0xF60000…00`  represented as `std::nullopt`. For this reason, there are a number of static
-/// members that handle `std::optional<Memo>` instead of `Memo` directly.
+/// `0xF60000…00`  represented as `std::nullopt`. This is why some static
+/// members handle `std::optional<Memo>` instead of `Memo` directly.
 class Memo
 {
 public:
-    static constexpr size_t SIZE{512};
+    static constexpr size_t SIZE = 512;
 
-    typedef unsigned char Byte;
+    using Byte = unsigned char;
+    using Bytes = std::array<Byte, SIZE>;
 
-    typedef std::array<Byte, SIZE> Bytes;
+    /// Represents memo contents with no interpretation.
+    using FutureData = Bytes;
 
-    /// These are memo contents that have not yet been assigned a meaning. The type is the same as
-    /// `MemoBytes`, but is used in the result of `Interpret` for memos that have yet to be given an
-    /// interpretation.
-    typedef std::array<Byte, SIZE> FutureData;
+    /// Arbitrary data prefixed by `0xFF`. The size must be `SIZE - 1` since the prefix occupies the first byte.
+    using ArbitraryData = std::array<Byte, SIZE - 1>;
 
-    /// Arbitrary data (initial byte 0xFF) size must be exactly one less than `SIZE` because the
-    /// initial byte is not part of the arbitrary data and we don’t know what type of padding is
-    /// required for the data, so we can’t internally pad short data.
-    typedef std::array<Byte, SIZE - 1> ArbitraryData;
-
-    /// The possible interpretations of the memo’s content.
-    ///
-    /// NB: The empty memo case doesn’t need to be covered here, because it is not represented by
-    ///     `Memo` proper.
-    typedef std::variant<
-        /// the first byte (byte 0) has a value of 0xF4 or smaller
+    /// The possible interpretations of a memo’s content.
+    using Contents = std::variant<
+        /// UTF-8 string for memos where the first byte is `<= 0xF4`.
         std::string,
-        /// * the first byte has a value of 0xF5;
-        /// * the first byte has a value of 0xF6, and the remaining 511 bytes are not all 0x00; or
-        /// * the first byte has a value between 0xF7 and 0xFE inclusive
+        /// Future data (values between `0xF5` and `0xFE`).
         FutureData,
-        /// the first byte has a value of 0xFF […] the remaining 511 bytes are then unconstrained
-        ArbitraryData
-        > Contents;
+        /// Arbitrary data prefixed with `0xFF`.
+        ArbitraryData>;
 
 private:
     Bytes value_;
 
-    static constexpr const Bytes noMemo{0xf6};
+    static constexpr Bytes noMemo = {0xf6};
 
-    /// This constructor trusts that the Memo is a valid memo, and constructs one even if it’s the
-    /// `noMemo` value.
-    explicit Memo(Bytes value): value_(value) {}
+    /// Constructs a memo assuming the provided value is valid.
+    explicit Memo(Bytes value) : value_(value) {}
 
 public:
+    /// Possible conversion errors for memo creation.
     enum class ConversionError {
         MemoTooLong,
     };
 
+    /// Possible text conversion errors.
     enum class TextConversionError {
         MemoTooLong,
         InvalidUTF8,
     };
 
+    /// Possible errors during memo interpretation.
     enum class InterpretationError {
         InvalidUTF8,
     };
 
-    /// Creates a memo from arbitrary data, which will always be prefixed by `0xFF`. This can _not_
-    /// be use to create an arbitrary memo (e.g., this will never have a UTF-8 representation or be
-    /// the empty memo).
-    Memo(const ArbitraryData& data);
+    /// Creates a memo from arbitrary data, always prefixed with `0xFF`.
+    explicit Memo(const ArbitraryData& data);
 
-    friend bool operator==(const Memo& a, const Memo& b);
+    /// Equality operators.
+    friend bool operator==(const Memo& a, const Memo& b) = default;
+    friend bool operator!=(const Memo& a, const Memo& b) = default;
 
-    // TODO: Remove once we’re using C++20.
-    friend bool operator!=(const Memo& a, const Memo& b);
-
+    /// Converts raw bytes into a `Memo` if valid.
     static std::optional<Memo> FromBytes(const Bytes& rawMemo);
 
     static std::optional<Memo> FromBytes(const Byte (&rawMemo)[SIZE]);
@@ -95,18 +84,19 @@ public:
     static tl::expected<std::optional<Memo>, ConversionError>
     FromBytes(const std::vector<Byte>& rawMemo);
 
-    /// Only supports UTF8-encoded memos. I.e., this doesn’t return in `std::optional`, because the
-    /// argument can’t contain the `noMemo` value.
+    /// Converts UTF-8 encoded text into a `Memo`.
     static tl::expected<Memo, TextConversionError> FromText(const std::string& memoStr);
 
-    const Bytes& ToBytes() const;
+    /// Retrieves the raw bytes of the memo.
+    [[nodiscard]] const Bytes& ToBytes() const;
 
-    static const Bytes& ToBytes(const std::optional<Memo>& memo);
+    /// Retrieves the raw bytes of an optional memo or `noMemo`.
+    [[nodiscard]] static const Bytes& ToBytes(const std::optional<Memo>& memo);
 
-    /// Interprets the memo according to https://zips.z.cash/zip-0302#specification. The
-    /// uninterpreted contents can be accessed via `ToBytes` and `ToHex`.
-    tl::expected<Contents, InterpretationError> Interpret() const;
+    /// Interprets the memo according to ZIP 302 specification.
+    [[nodiscard]] tl::expected<Contents, InterpretationError> Interpret() const;
 };
-}
+
+} // namespace libzcash
 
 #endif // ZCASH_ZCASH_MEMO_H
