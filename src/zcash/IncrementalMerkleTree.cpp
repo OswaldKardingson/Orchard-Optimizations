@@ -1,7 +1,9 @@
+// Copyright (c) 2021-2024 The Pirate developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
 #include <stdexcept>
-
-#include <boost/foreach.hpp>
-
+#include <vector>  // Replacing deque where sequential access is required
 #include "zcash/IncrementalMerkleTree.hpp"
 #include "crypto/sha256.h"
 #include "zcash/util.h"
@@ -15,23 +17,19 @@ PedersenHash PedersenHash::combine(
     size_t depth
 )
 {
-    PedersenHash res = PedersenHash();
-
+    PedersenHash res;
     librustzcash_merkle_hash(
         depth,
         a.begin(),
         b.begin(),
         res.begin()
     );
-
     return res;
 }
 
 PedersenHash PedersenHash::uncommitted() {
-    PedersenHash res = PedersenHash();
-
+    PedersenHash res;
     librustzcash_tree_uncommitted(res.begin());
-
     return res;
 }
 
@@ -41,39 +39,35 @@ SHA256Compress SHA256Compress::combine(
     size_t depth
 )
 {
-    SHA256Compress res = SHA256Compress();
-
+    SHA256Compress res;
     CSHA256 hasher;
     hasher.Write(a.begin(), 32);
     hasher.Write(b.begin(), 32);
     hasher.FinalizeNoPadding(res.begin());
-
     return res;
 }
 
 template <size_t Depth, typename Hash>
 class PathFiller {
 private:
-    std::deque<Hash> queue;
+    std::vector<Hash> queue;  // Changed to vector for better cache locality
     static EmptyMerkleRoots<Depth, Hash> emptyroots;
 public:
-    PathFiller() : queue() { }
-    PathFiller(std::deque<Hash> queue) : queue(queue) { }
+    PathFiller() = default;
+    explicit PathFiller(std::vector<Hash> queue) : queue(std::move(queue)) {}
 
     Hash next(size_t depth) {
-        if (queue.size() > 0) {
+        if (!queue.empty()) {
             Hash h = queue.front();
-            queue.pop_front();
-
+            queue.erase(queue.begin());
             return h;
         } else {
             return emptyroots.empty_root(depth);
         }
     }
-
 };
 
-template<size_t Depth, typename Hash>
+template <size_t Depth, typename Hash>
 EmptyMerkleRoots<Depth, Hash> PathFiller<Depth, Hash>::emptyroots;
 
 template<size_t Depth, typename Hash>
@@ -82,19 +76,19 @@ void IncrementalMerkleTree<Depth, Hash>::wfcheck() const {
         throw std::ios_base::failure("tree has too many parents");
     }
 
-    // The last parent cannot be null.
-    if (!(parents.empty()) && !(parents.back())) {
+    // Ensure the last parent is not null
+    if (!parents.empty() && !parents.back()) {
         throw std::ios_base::failure("tree has non-canonical representation of parent");
     }
 
-    // Left cannot be empty when right exists.
+    // Left cannot be empty when right exists
     if (!left && right) {
         throw std::ios_base::failure("tree has non-canonical representation; right should not exist");
     }
 
-    // Left cannot be empty when parents is nonempty.
-    if (!left && parents.size() > 0) {
-        throw std::ios_base::failure("tree has non-canonical representation; parents should not be unempty");
+    // Left cannot be empty when parents are nonempty
+    if (!left && !parents.empty()) {
+        throw std::ios_base::failure("tree has non-canonical representation; parents should not be empty");
     }
 }
 
@@ -111,41 +105,28 @@ Hash IncrementalMerkleTree<Depth, Hash>::last() const {
 
 template<size_t Depth, typename Hash>
 size_t IncrementalMerkleTree<Depth, Hash>::size() const {
-    size_t ret = 0;
-    if (left) {
-        ret++;
-    }
-    if (right) {
-        ret++;
-    }
-    // Treat occupation of parents array as a binary number
-    // (right-shifted by 1)
+    size_t ret = left.has_value() + right.has_value();
     for (size_t i = 0; i < parents.size(); i++) {
         if (parents[i]) {
-            ret += (1 << (i+1));
+            ret += (1U << (i + 1));  // Binary representation as tree size
         }
     }
     return ret;
 }
 
 template<size_t Depth, typename Hash>
-SubtreeIndex IncrementalMerkleTree<Depth, Hash>::current_subtree_index() const
-{
+SubtreeIndex IncrementalMerkleTree<Depth, Hash>::current_subtree_index() const {
     return size() >> TRACKED_SUBTREE_HEIGHT;
 }
 
 template<size_t Depth, typename Hash>
-Hash IncrementalMerkleTree<Depth, Hash>::complete_subtree_root() const
-{
+Hash IncrementalMerkleTree<Depth, Hash>::complete_subtree_root() const {
     auto treeSize = size();
 
-    if ((treeSize != 0) && ((treeSize % (1 << TRACKED_SUBTREE_HEIGHT)) == 0)) {
-        // We are sitting on a 2^TRACKED_SUBTREE_HEIGHT boundary here.
-        assert(left);
-        assert(right);
+    if (treeSize && ((treeSize % (1U << TRACKED_SUBTREE_HEIGHT)) == 0)) {
+        assert(left && right);
         assert(parents.size() >= (TRACKED_SUBTREE_HEIGHT - 1));
-        // All of the TRACKED_SUBTREE_HEIGHT - 1 elements in the parents
-        // should be occupied or this would not be a completed subtree
+
         for (size_t i = 0; i < TRACKED_SUBTREE_HEIGHT - 1; i++) {
             assert(parents[i]);
         }
@@ -168,26 +149,23 @@ void IncrementalMerkleTree<Depth, Hash>::append(Hash obj) {
     }
 
     if (!left) {
-        // Set the left leaf
-        left = obj;
+        left = obj; // Set the left leaf
     } else if (!right) {
-        // Set the right leaf
-        right = obj;
+        right = obj; // Set the right leaf
     } else {
-        // Combine the leaves and propagate it up the tree
-        std::optional<Hash> combined = Hash::combine(*left, *right, 0);
+        // Combine the leaves and propagate up the tree
+        auto combined = Hash::combine(*left, *right, 0);
 
-        // Set the "left" leaf to the object and make the "right" leaf none
-        left = obj;
-        right = std::nullopt;
+        left = obj; // Reset left leaf
+        right.reset(); // Clear right leaf
 
-        for (size_t i = 0; i < Depth; i++) {
+        for (size_t i = 0; i < Depth; ++i) {
             if (i < parents.size()) {
                 if (parents[i]) {
-                    combined = Hash::combine(*parents[i], *combined, i+1);
-                    parents[i] = std::nullopt;
+                    combined = Hash::combine(*parents[i], combined, i + 1);
+                    parents[i].reset();
                 } else {
-                    parents[i] = *combined;
+                    parents[i] = combined;
                     break;
                 }
             } else {
@@ -198,9 +176,6 @@ void IncrementalMerkleTree<Depth, Hash>::append(Hash obj) {
     }
 }
 
-// This is for allowing the witness to determine if a subtree has filled
-// to a particular depth, or for append() to ensure we're not appending
-// to a full tree.
 template<size_t Depth, typename Hash>
 bool IncrementalMerkleTree<Depth, Hash>::is_complete(size_t depth) const {
     if (!left || !right) {
@@ -211,21 +186,13 @@ bool IncrementalMerkleTree<Depth, Hash>::is_complete(size_t depth) const {
         return false;
     }
 
-    BOOST_FOREACH(const std::optional<Hash>& parent, parents) {
-        if (!parent) {
-            return false;
-        }
-    }
-
-    return true;
+    return std::all_of(parents.begin(), parents.end(), [](const auto& parent) { return parent.has_value(); });
 }
 
-// This finds the next "depth" of an unfilled subtree, given that we've filled
-// `skip` uncles/subtrees.
 template<size_t Depth, typename Hash>
 size_t IncrementalMerkleTree<Depth, Hash>::next_depth(size_t skip) const {
     if (!left) {
-        if (skip) {
+        if (skip > 0) {
             skip--;
         } else {
             return 0;
@@ -233,55 +200,46 @@ size_t IncrementalMerkleTree<Depth, Hash>::next_depth(size_t skip) const {
     }
 
     if (!right) {
-        if (skip) {
+        if (skip > 0) {
             skip--;
         } else {
             return 0;
         }
     }
 
-    size_t d = 1;
-
-    BOOST_FOREACH(const std::optional<Hash>& parent, parents) {
+    size_t depth = 1;
+    for (const auto& parent : parents) {
         if (!parent) {
-            if (skip) {
+            if (skip > 0) {
                 skip--;
             } else {
-                return d;
+                return depth;
             }
         }
-
-        d++;
+        depth++;
     }
 
-    return d + skip;
+    return depth + skip;
 }
 
-// This calculates the root of the tree.
 template<size_t Depth, typename Hash>
-Hash IncrementalMerkleTree<Depth, Hash>::root(size_t depth,
-                                              std::deque<Hash> filler_hashes) const {
-    PathFiller<Depth, Hash> filler(filler_hashes);
+Hash IncrementalMerkleTree<Depth, Hash>::root(size_t depth, std::deque<Hash> filler_hashes) const {
+    PathFiller<Depth, Hash> filler(std::move(filler_hashes));
 
-    Hash combine_left =  left  ? *left  : filler.next(0);
-    Hash combine_right = right ? *right : filler.next(0);
-
+    Hash combine_left = left.value_or(filler.next(0));
+    Hash combine_right = right.value_or(filler.next(0));
     Hash root = Hash::combine(combine_left, combine_right, 0);
 
     size_t d = 1;
-
-    BOOST_FOREACH(const std::optional<Hash>& parent, parents) {
+    for (const auto& parent : parents) {
         if (parent) {
             root = Hash::combine(*parent, root, d);
         } else {
             root = Hash::combine(root, filler.next(d), d);
         }
-
         d++;
     }
 
-    // We may not have parents for ancestor trees, so we fill
-    // the rest in here.
     while (d < depth) {
         root = Hash::combine(root, filler.next(d), d);
         d++;
@@ -290,15 +248,13 @@ Hash IncrementalMerkleTree<Depth, Hash>::root(size_t depth,
     return root;
 }
 
-// This constructs an authentication path into the tree in the format that the circuit
-// wants. The caller provides `filler_hashes` to fill in the uncle subtrees.
 template<size_t Depth, typename Hash>
 MerklePath IncrementalMerkleTree<Depth, Hash>::path(std::deque<Hash> filler_hashes) const {
     if (!left) {
-        throw std::runtime_error("can't create an authentication path for the beginning of the tree");
+        throw std::runtime_error("Cannot create an authentication path for an empty tree");
     }
 
-    PathFiller<Depth, Hash> filler(filler_hashes);
+    PathFiller<Depth, Hash> filler(std::move(filler_hashes));
 
     std::vector<Hash> path;
     std::vector<bool> index;
@@ -311,32 +267,28 @@ MerklePath IncrementalMerkleTree<Depth, Hash>::path(std::deque<Hash> filler_hash
         path.push_back(filler.next(0));
     }
 
-    size_t d = 1;
-
-    BOOST_FOREACH(const std::optional<Hash>& parent, parents) {
+    size_t depth = 1;
+    for (const auto& parent : parents) {
         if (parent) {
             index.push_back(true);
             path.push_back(*parent);
         } else {
             index.push_back(false);
-            path.push_back(filler.next(d));
+            path.push_back(filler.next(depth));
         }
-
-        d++;
+        depth++;
     }
 
-    while (d < Depth) {
+    while (depth < Depth) {
         index.push_back(false);
-        path.push_back(filler.next(d));
-        d++;
+        path.push_back(filler.next(depth));
+        depth++;
     }
 
     std::vector<std::vector<bool>> merkle_path;
-    BOOST_FOREACH(Hash b, path)
-    {
-        std::vector<unsigned char> hashv(b.begin(), b.end());
-
-        merkle_path.push_back(convertBytesVectorToVector(hashv));
+    for (const auto& hash : path) {
+        std::vector<unsigned char> hash_bytes(hash.begin(), hash.end());
+        merkle_path.push_back(convertBytesVectorToVector(hash_bytes));
     }
 
     std::reverse(merkle_path.begin(), merkle_path.end());
@@ -363,24 +315,25 @@ void IncrementalWitness<Depth, Hash>::append(Hash obj) {
 
         if (cursor->is_complete(cursor_depth)) {
             filled.push_back(cursor->root(cursor_depth));
-            cursor = std::nullopt;
+            cursor.reset();
         }
     } else {
         cursor_depth = tree.next_depth(filled.size());
 
         if (cursor_depth >= Depth) {
-            throw std::runtime_error("tree is full");
+            throw std::runtime_error("Tree is full");
         }
 
         if (cursor_depth == 0) {
             filled.push_back(obj);
         } else {
-            cursor = IncrementalMerkleTree<Depth, Hash>();
+            cursor.emplace();
             cursor->append(obj);
         }
     }
 }
 
+// Specialize templates for supported tree depths and hash types
 template class IncrementalMerkleTree<INCREMENTAL_MERKLE_TREE_DEPTH, SHA256Compress>;
 template class IncrementalMerkleTree<INCREMENTAL_MERKLE_TREE_DEPTH_TESTING, SHA256Compress>;
 
@@ -393,4 +346,4 @@ template class IncrementalMerkleTree<INCREMENTAL_MERKLE_TREE_DEPTH_TESTING, Pede
 template class IncrementalWitness<SAPLING_INCREMENTAL_MERKLE_TREE_DEPTH, PedersenHash>;
 template class IncrementalWitness<INCREMENTAL_MERKLE_TREE_DEPTH_TESTING, PedersenHash>;
 
-} // end namespace `libzcash`
+} // namespace libzcash
