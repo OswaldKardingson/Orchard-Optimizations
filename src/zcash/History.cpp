@@ -1,7 +1,12 @@
+// Copyright (c) 2021-2024 The Pirate developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
 #include "zcash/History.hpp"
 
 #include <stdexcept>
-
+#include <vector>
+#include <cstring> // For memcpy
 
 #include "consensus/upgrades.h"
 #include "serialize.h"
@@ -11,14 +16,11 @@
 
 namespace libzcash {
 
-void HistoryCache::Extend(const HistoryNode &leaf) {
+void HistoryCache::Extend(const HistoryNode& leaf) {
     appends[length++] = leaf;
 }
 
 void HistoryCache::Truncate(HistoryIndex newLength) {
-    // Remove any to-be-appended nodes beyond the new length. The array representation is
-    // zero-indexed, and HistoryIndex is unsigned, so we handle the truncate-to-zero case
-    // separately.
     if (newLength > 0) {
         for (HistoryIndex idx = length; idx >= newLength; idx--) {
             appends.erase(idx);
@@ -28,66 +30,70 @@ void HistoryCache::Truncate(HistoryIndex newLength) {
     }
 
     length = newLength;
-    // we track how deep updates go back in the tree, so we could later
-    // update everything starting from `updateDepth`
-    //
-    // imagine we rolled two blocks back and then put another 3 blocks on top
-    // of the rolled back state. In that case `updateDepth` will be H-3, while length
-    // will be H (where H is a final chain height after such operation). So we know that
-    // history entries in the range of H-3..H are expected to be pushed into the database
-    // to replace/append to the persistent nodes there.
     if (updateDepth > length) updateDepth = length;
 }
 
 HistoryNode NewNode(
-        uint256 subtreeCommitment,
-        uint32_t startTime,
-        uint32_t endTime,
-        uint32_t startTarget,
-        uint32_t endTarget,
-        uint256 startSaplingRoot,
-        uint256 endSaplingRoot,
-        std::optional<uint256> startOrchardRoot,
-        std::optional<uint256> endOrchardRoot,
-        uint256 subtreeTotalWork,
-        uint64_t startHeight,
-        uint64_t endHeight,
-        uint64_t saplingTxCount,
-        std::optional<uint64_t> orchardTxCount
-    )
-{
-    CDataStream buf(SER_DISK, 0);
-    HistoryNode result = {};
+    const uint256& subtreeCommitment,
+    uint32_t startTime,
+    uint32_t endTime,
+    uint32_t startTarget,
+    uint32_t endTarget,
+    const uint256& startSaplingRoot,
+    const uint256& endSaplingRoot,
+    const std::optional<uint256>& startOrchardRoot,
+    const std::optional<uint256>& endOrchardRoot,
+    const uint256& subtreeTotalWork,
+    uint64_t startHeight,
+    uint64_t endHeight,
+    uint64_t saplingTxCount,
+    const std::optional<uint64_t>& orchardTxCount
+) {
+    std::vector<uint8_t> buffer;
+    buffer.reserve(NODE_SERIALIZED_LENGTH);
 
-    buf << subtreeCommitment;
-    buf << startTime;
-    buf << endTime;
-    buf << startTarget;
-    buf << endTarget;
-    buf << startSaplingRoot;
-    buf << endSaplingRoot;
-    buf << subtreeTotalWork;
-    buf << COMPACTSIZE(startHeight);
-    buf << COMPACTSIZE(endHeight);
-    buf << COMPACTSIZE(saplingTxCount);
+    auto serialize_uint256 = [&](const uint256& value) {
+        buffer.insert(buffer.end(), value.begin(), value.end());
+    };
+
+    serialize_uint256(subtreeCommitment);
+    buffer.insert(buffer.end(), reinterpret_cast<const uint8_t*>(&startTime), reinterpret_cast<const uint8_t*>(&startTime) + sizeof(startTime));
+    buffer.insert(buffer.end(), reinterpret_cast<const uint8_t*>(&endTime), reinterpret_cast<const uint8_t*>(&endTime) + sizeof(endTime));
+    buffer.insert(buffer.end(), reinterpret_cast<const uint8_t*>(&startTarget), reinterpret_cast<const uint8_t*>(&startTarget) + sizeof(startTarget));
+    buffer.insert(buffer.end(), reinterpret_cast<const uint8_t*>(&endTarget), reinterpret_cast<const uint8_t*>(&endTarget) + sizeof(endTarget));
+    serialize_uint256(startSaplingRoot);
+    serialize_uint256(endSaplingRoot);
+    serialize_uint256(subtreeTotalWork);
+
+    auto serialize_compact_size = [&](uint64_t value) {
+        CDataStream tempBuf(SER_DISK, 0);
+        tempBuf << COMPACTSIZE(value);
+        buffer.insert(buffer.end(), tempBuf.begin(), tempBuf.end());
+    };
+
+    serialize_compact_size(startHeight);
+    serialize_compact_size(endHeight);
+    serialize_compact_size(saplingTxCount);
+
     if (startOrchardRoot) {
-        // If startOrchardRoot is provided, assume all V2 fields are.
-        buf << startOrchardRoot.value();
-        buf << endOrchardRoot.value();
-        buf << COMPACTSIZE(orchardTxCount.value());
+        serialize_uint256(*startOrchardRoot);
+        serialize_uint256(*endOrchardRoot);
+        serialize_compact_size(*orchardTxCount);
     }
 
-    assert(buf.size() <= NODE_SERIALIZED_LENGTH);
-    std::copy(std::begin(buf), std::end(buf), result.begin());
+    assert(buffer.size() <= NODE_SERIALIZED_LENGTH);
+
+    HistoryNode result{};
+    std::memcpy(result.data(), buffer.data(), buffer.size());
     return result;
 }
 
 HistoryNode NewV1Leaf(
-    uint256 commitment,
+    const uint256& commitment,
     uint32_t time,
     uint32_t target,
-    uint256 saplingRoot,
-    uint256 totalWork,
+    const uint256& saplingRoot,
+    const uint256& totalWork,
     uint64_t height,
     uint64_t saplingTxCount
 ) {
@@ -110,12 +116,12 @@ HistoryNode NewV1Leaf(
 }
 
 HistoryNode NewV2Leaf(
-    uint256 commitment,
+    const uint256& commitment,
     uint32_t time,
     uint32_t target,
-    uint256 saplingRoot,
-    uint256 orchardRoot,
-    uint256 totalWork,
+    const uint256& saplingRoot,
+    const uint256& orchardRoot,
+    const uint256& totalWork,
     uint64_t height,
     uint64_t saplingTxCount,
     uint64_t orchardTxCount
@@ -138,42 +144,46 @@ HistoryNode NewV2Leaf(
     );
 }
 
-HistoryEntry NodeToEntry(const HistoryNode node, uint32_t left, uint32_t right) {
-    CDataStream buf(SER_DISK, 0);
-    HistoryEntry result;
+HistoryEntry NodeToEntry(const HistoryNode& node, uint32_t left, uint32_t right) {
+    std::vector<uint8_t> buffer;
+    buffer.reserve(ENTRY_SERIALIZED_LENGTH);
 
-    uint8_t code = 0;
-    buf << code;
-    buf << left;
-    buf << right;
-    buf << node;
+    buffer.push_back(0); // code for node entry
+    buffer.insert(buffer.end(), reinterpret_cast<const uint8_t*>(&left), reinterpret_cast<const uint8_t*>(&left) + sizeof(left));
+    buffer.insert(buffer.end(), reinterpret_cast<const uint8_t*>(&right), reinterpret_cast<const uint8_t*>(&right) + sizeof(right));
+    buffer.insert(buffer.end(), node.begin(), node.end());
 
-    assert(buf.size() <= ENTRY_SERIALIZED_LENGTH);
-    std::copy(std::begin(buf), std::end(buf), result.begin());
+    assert(buffer.size() <= ENTRY_SERIALIZED_LENGTH);
 
+    HistoryEntry result{};
+    std::memcpy(result.data(), buffer.data(), buffer.size());
     return result;
 }
 
-HistoryEntry LeafToEntry(const HistoryNode node) {
-    CDataStream buf(SER_DISK, 0);
-    HistoryEntry result;
+HistoryEntry LeafToEntry(const HistoryNode& node) {
+    std::vector<uint8_t> buffer;
+    buffer.reserve(ENTRY_SERIALIZED_LENGTH);
 
-    uint8_t code = 1;
-    buf << code;
-    buf << node;
+    buffer.push_back(1); // code for leaf entry
+    buffer.insert(buffer.end(), node.begin(), node.end());
 
-    assert(buf.size() <= ENTRY_SERIALIZED_LENGTH);
-    std::copy(std::begin(buf), std::end(buf), result.begin());
+    assert(buffer.size() <= ENTRY_SERIALIZED_LENGTH);
 
+    HistoryEntry result{};
+    std::memcpy(result.data(), buffer.data(), buffer.size());
     return result;
 }
 
 bool IsV1HistoryTree(uint32_t epochId) {
-    return (
-        epochId == NetworkUpgradeInfo[Consensus::BASE_SPROUT].nBranchId ||
-        epochId == NetworkUpgradeInfo[Consensus::UPGRADE_OVERWINTER].nBranchId ||
-        epochId == NetworkUpgradeInfo[Consensus::UPGRADE_SAPLING].nBranchId 
-    );
+    static const std::unordered_set<uint32_t> v1Branches = {
+        NetworkUpgradeInfo[Consensus::BASE_SPROUT].nBranchId,
+        NetworkUpgradeInfo[Consensus::UPGRADE_OVERWINTER].nBranchId,
+        NetworkUpgradeInfo[Consensus::UPGRADE_SAPLING].nBranchId
+    };
+
+    return v1Branches.count(epochId) > 0;
 }
 
-}
+} // namespace libzcash
+
+
