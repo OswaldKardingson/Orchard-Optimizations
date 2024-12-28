@@ -1,4 +1,5 @@
 // Copyright (c) 2018 The Zcash developers
+// Copyright (c) 2021-2024 The Pirate developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -12,6 +13,7 @@
 
 #include <librustzcash.h>
 #include <sodium.h>
+#include <stdexcept> // Improved exception handling
 
 const unsigned char ZCASH_HD_SEED_FP_ENCRYTION[crypto_generichash_blake2b_PERSONALBYTES] =
     {'P', 'i', 'r', 'a', 't', 'e', 'E', 'n', 'c', 'r', 'y', 'p', 't','_','F', 'P'};
@@ -24,7 +26,10 @@ const unsigned char ZCASH_TADDR_OVK_PERSONAL[crypto_generichash_blake2b_PERSONAL
 
 HDSeed HDSeed::Random(size_t len)
 {
-    assert(len == 32);
+    if (len != 32) {
+        throw std::invalid_argument("HDSeed::Random requires length to be 32 bytes.");
+    }
+
     RawHDSeed rawSeed(len, 0);
     librustzcash_getrandom(rawSeed.data(), len);
     return HDSeed(rawSeed);
@@ -32,84 +37,65 @@ HDSeed HDSeed::Random(size_t len)
 
 HDSeed HDSeed::RestoreFromPhrase(std::string &phrase)
 {
-    bool bResult;
+    std::stringstream stream(phrase);
+    unsigned int wordCount = std::distance(
+        std::istream_iterator<std::string>(stream), 
+        std::istream_iterator<std::string>()
+    );
 
-    //Count the nr of words in the phrase:
-    std::stringstream stream( phrase );
-    unsigned int iCount = std::distance(std::istream_iterator<std::string>(stream), std::istream_iterator<std::string>());
+    RawHDSeed restoredSeed;
+    size_t entropySize;
 
-    if (iCount==12) //12 word mnemonic: 16 byte entropy
-    {
-      RawHDSeed restoredSeed(16, 0);
-      bResult = librustzcash_restore_seed_from_phase(restoredSeed.data(), 16, phrase.c_str());
-      if (bResult==false)
-      {
-        printf("librustzcash_restore_seed_from_phase() Restpre failed\n");
-        throw std::runtime_error("librustzcash_restore_seed_from_phase() Restore failed");
-      }
+    switch (wordCount) {
+        case 12: entropySize = 16; break;
+        case 18: entropySize = 24; break;
+        case 24: entropySize = 32; break;
+        default:
+            throw std::invalid_argument("HDSeed::RestoreFromPhrase invalid number of words.");
+    }
 
-      return HDSeed(restoredSeed);
+    restoredSeed.resize(entropySize);
+    if (!librustzcash_restore_seed_from_phase(restoredSeed.data(), entropySize, phrase.c_str())) {
+        throw std::runtime_error("Failed to restore seed from phrase.");
     }
-    else if (iCount==18) //18 word mnemonic : 24 byte entropy
-    {
-      RawHDSeed restoredSeed(24, 0);
-      bResult = librustzcash_restore_seed_from_phase(restoredSeed.data(), 24, phrase.c_str());
-      if (bResult==false)
-      {
-        printf("librustzcash_restore_seed_from_phase() Retore failed\n");
-        throw std::runtime_error("librustzcash_restore_seed_from_phase() Restore failed");
-      }
-      return HDSeed(restoredSeed);
-    }
-    else //24 word mnemonic: 32 byte entropy
-    {
-      //Restore from Phrase
-      RawHDSeed restoredSeed(32, 0);
-      bResult = librustzcash_restore_seed_from_phase(restoredSeed.data(), 32, phrase.c_str());
-      if (bResult==false)
-      {
-        printf("librustzcash_restore_seed_from_phase() Restore failed\n");
-        throw std::runtime_error("librustzcash_restore_seed_from_phase() Restore failed");
-      }
-      return HDSeed(restoredSeed);
-    }
+
+    return HDSeed(restoredSeed);
 }
 
 bool HDSeed::IsValidPhrase(std::string &phrase)
 {
-    //Count the nr of words in the phrase:
     std::stringstream stream(phrase);
-    unsigned int iCount = std::distance(std::istream_iterator<std::string>(stream), std::istream_iterator<std::string>());
+    unsigned int wordCount = std::distance(
+        std::istream_iterator<std::string>(stream), 
+        std::istream_iterator<std::string>()
+    );
 
-    if (iCount==12) //12 word mnemonic: 16 byte entropy
-    {
-      RawHDSeed restoredSeed(16, 0);
-      return librustzcash_restore_seed_from_phase(restoredSeed.data(), 16, phrase.c_str());
+    RawHDSeed restoredSeed;
+    size_t entropySize;
+
+    switch (wordCount) {
+        case 12: entropySize = 16; break;
+        case 18: entropySize = 24; break;
+        case 24: entropySize = 32; break;
+        default:
+            return false; // Invalid word count
     }
-    else if (iCount==18) //18 word mnemonic : 24 byte entropy
-    {
-      RawHDSeed restoredSeed(24, 0);
-      return librustzcash_restore_seed_from_phase(restoredSeed.data(), 24, phrase.c_str());
-    }
-    else if (iCount==24) //24 word mnemonic: 32 byte entropy
-    {
-      //Restore from Phrase
-      RawHDSeed restoredSeed(32, 0);
-      return librustzcash_restore_seed_from_phase(restoredSeed.data(), 32, phrase.c_str());
-    }
-    else
-    {
-      printf("Invalid number of words in the phrase\n");
-      return false;
-    }
+
+    restoredSeed.resize(entropySize);
+    return librustzcash_restore_seed_from_phase(restoredSeed.data(), entropySize, phrase.c_str());
 }
 
 void HDSeed::GetPhrase(std::string &phrase)
 {
     auto rawSeed = this->RawSeed();
-    char *rustPhrase = librustzcash_get_seed_phrase(rawSeed.data(), rawSeed.size() );
-    std::string newPhrase(rustPhrase);
-    phrase = newPhrase;
+    char *rustPhrase = librustzcash_get_seed_phrase(rawSeed.data(), rawSeed.size());
+    if (!rustPhrase) {
+        throw std::runtime_error("Failed to retrieve phrase from seed.");
+    }
+
+    phrase.assign(rustPhrase);
+    sodium_memzero(rustPhrase, strlen(rustPhrase)); // Securely clear the memory
+    free(rustPhrase); // Free the dynamically allocated memory
 }
 
 uint256 HDSeed::Fingerprint() const
@@ -129,23 +115,23 @@ uint256 HDSeed::EncryptionFingerprint() const
 uint256 ovkForShieldingFromTaddr(HDSeed& seed) {
     auto rawSeed = seed.RawSeed();
 
-    // I = BLAKE2b-512("ZcTaddrToSapling", seed)
     crypto_generichash_blake2b_state state;
-    assert(crypto_generichash_blake2b_init_salt_personal(
+    if (crypto_generichash_blake2b_init_salt_personal(
         &state,
-        NULL, 0, // No key.
+        nullptr, 0, // No key
         64,
-        NULL,    // No salt.
-        ZCASH_TADDR_OVK_PERSONAL) == 0);
+        nullptr,    // No salt
+        ZCASH_TADDR_OVK_PERSONAL) != 0) {
+        throw std::runtime_error("Failed to initialize Blake2b hash state.");
+    }
+
     crypto_generichash_blake2b_update(&state, rawSeed.data(), rawSeed.size());
     auto intermediate = std::array<unsigned char, 64>();
     crypto_generichash_blake2b_final(&state, intermediate.data(), 64);
 
-    // I_L = I[0..32]
     uint256 intermediate_L;
     memcpy(intermediate_L.begin(), intermediate.data(), 32);
 
-    // ovk = truncate_32(PRF^expand(I_L, [0x02]))
     return PRF_ovk(intermediate_L);
 }
 
@@ -173,7 +159,7 @@ std::optional<SaplingExtendedFullViewingKey> SaplingExtendedFullViewingKey::Deri
 }
 
 std::optional<std::pair<diversifier_index_t, libzcash::SaplingPaymentAddress>>
-    SaplingExtendedFullViewingKey::Address(diversifier_index_t j) const
+SaplingExtendedFullViewingKey::Address(diversifier_index_t j) const
 {
     CDataStream ss_xfvk(SER_NETWORK, PROTOCOL_VERSION);
     ss_xfvk << *this;
@@ -198,9 +184,8 @@ libzcash::SaplingPaymentAddress SaplingExtendedFullViewingKey::DefaultAddress() 
 {
     diversifier_index_t j0;
     auto addr = Address(j0);
-    // If we can't obtain a default address, we are *very* unlucky...
     if (!addr) {
-        throw std::runtime_error("SaplingExtendedFullViewingKey::DefaultAddress(): No valid diversifiers out of 2^88!");
+        throw std::runtime_error("Failed to derive default address: No valid diversifiers available.");
     }
     return addr.value().second;
 }
@@ -210,7 +195,7 @@ SaplingExtendedSpendingKey SaplingExtendedSpendingKey::Master(const HDSeed& seed
     auto rawSeed = seed.RawSeed();
     CSerializeData m_bytes(SAPLING_ZIP32_XSK_SIZE);
 
-    unsigned char* bip39_seed = librustzcash_get_bip39_seed(rawSeed.data(),rawSeed.size());
+    unsigned char* bip39_seed = librustzcash_get_bip39_seed(rawSeed.data(), rawSeed.size());
 
     if (bip39Enabled) {
         librustzcash_zip32_xsk_master(
@@ -218,16 +203,19 @@ SaplingExtendedSpendingKey SaplingExtendedSpendingKey::Master(const HDSeed& seed
             64,
             reinterpret_cast<unsigned char*>(m_bytes.data()));
     } else {
-      librustzcash_zip32_xsk_master(
-          rawSeed.data(),
-          rawSeed.size(),
-          reinterpret_cast<unsigned char*>(m_bytes.data()));
+        librustzcash_zip32_xsk_master(
+            rawSeed.data(),
+            rawSeed.size(),
+            reinterpret_cast<unsigned char*>(m_bytes.data()));
     }
-
 
     CDataStream ss(m_bytes, SER_NETWORK, PROTOCOL_VERSION);
     SaplingExtendedSpendingKey xsk_m;
     ss >> xsk_m;
+
+    sodium_memzero(bip39_seed, sizeof(bip39_seed));
+    free(bip39_seed);
+
     return xsk_m;
 }
 
@@ -268,79 +256,43 @@ libzcash::SaplingPaymentAddress SaplingExtendedSpendingKey::DefaultAddress() con
 
 OrchardExtendedSpendingKeyPirate OrchardExtendedSpendingKeyPirate::Master(const HDSeed& seed, bool bip39Enabled)
 {
-
-    //Datastreams for serialization
-    CDataStream rs(SER_NETWORK, PROTOCOL_VERSION); //returning stream
-
-    //Tranfer Data
+    CDataStream rs(SER_NETWORK, PROTOCOL_VERSION); // Returning stream
     OrchardExtendedSpendingKey_t xsk_t_out;
 
-    //Return Type
-    OrchardExtendedSpendingKeyPirate xsk;
-
-    //Get raw seed to derive Master Spending key from
     auto rawSeed = seed.RawSeed();
-    unsigned char* bip39_seed = librustzcash_get_bip39_seed(rawSeed.data(),rawSeed.size());
+    unsigned char* bip39_seed = librustzcash_get_bip39_seed(rawSeed.data(), rawSeed.size());
 
-    //Call rust FFI
     if (bip39Enabled) {
-        orchard_derive_master_key(bip39_seed,64,xsk_t_out.begin());
+        orchard_derive_master_key(bip39_seed, 64, xsk_t_out.begin());
     } else {
         orchard_derive_master_key(rawSeed.data(), rawSeed.size(), xsk_t_out.begin());
     }
 
-    //Deserialize rust result
+    OrchardExtendedSpendingKeyPirate xsk;
     rs << xsk_t_out;
     rs >> xsk;
 
-    //Cleanse the memory of the transfer and serialization objects
-    memory_cleanse(rs.data(), rs.size());
-    memory_cleanse(xsk_t_out.data(), xsk_t_out.size());
-    memory_cleanse(rawSeed.data(), rawSeed.size());
-    memory_cleanse(bip39_seed, sizeof(bip39_seed));
+    sodium_memzero(bip39_seed, sizeof(bip39_seed));
+    free(bip39_seed);
 
-    //Return data
     return xsk;
-
 }
 
 std::optional<OrchardExtendedSpendingKeyPirate> OrchardExtendedSpendingKeyPirate::DeriveChild(uint32_t bip44CoinType, uint32_t account) const
 {
-    //Datastreams for serialization
-    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION); //sending stream
-    CDataStream rs(SER_NETWORK, PROTOCOL_VERSION); //returning stream
+    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION); // Sending stream
+    CDataStream rs(SER_NETWORK, PROTOCOL_VERSION); // Returning stream
 
-    //Tranfer Data
     OrchardExtendedSpendingKey_t xsk_t_out;
     OrchardExtendedSpendingKey_t xsk_t_in;
 
-    //Return Type
-    OrchardExtendedSpendingKeyPirate xsk;
-
-    //rust result
-    bool rustCompleted;
-
-    //Serialize sending data
     ss << *this;
     ss >> xsk_t_in;
 
-    //Call rust FFI
-    rustCompleted = orchard_derive_child_key(xsk_t_in.begin(), bip44CoinType, account, xsk_t_out.begin());
-
-    //Deserialize rust result on success
-    if (rustCompleted) {
+    if (orchard_derive_child_key(xsk_t_in.begin(), bip44CoinType, account, xsk_t_out.begin())) {
+        OrchardExtendedSpendingKeyPirate xsk;
         rs << xsk_t_out;
         rs >> xsk;
-    }
-
-    //Cleanse the memory of the transfer and serialization objects
-    memory_cleanse(ss.data(), ss.size());
-    memory_cleanse(rs.data(), rs.size());
-    memory_cleanse(xsk_t_in.data(), xsk_t_in.size());
-    memory_cleanse(xsk_t_out.data(), xsk_t_out.size());
-
-    //Return data
-    if (rustCompleted) {
         return xsk;
     }
 
@@ -350,7 +302,7 @@ std::optional<OrchardExtendedSpendingKeyPirate> OrchardExtendedSpendingKeyPirate
 std::optional<OrchardExtendedFullViewingKeyPirate> OrchardExtendedSpendingKeyPirate::GetXFVK() const
 {
     auto fvkOpt = sk.GetFVK();
-    if (fvkOpt != std::nullopt) {
+    if (fvkOpt) {
         OrchardExtendedFullViewingKeyPirate ret;
         ret.depth = depth;
         ret.parentFVKTag = parentFVKTag;
@@ -362,4 +314,4 @@ std::optional<OrchardExtendedFullViewingKeyPirate> OrchardExtendedSpendingKeyPir
     return std::nullopt;
 }
 
-}
+} // namespace libzcash
