@@ -1,89 +1,95 @@
+// Copyright (c) 2021-2024 The Pirate developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .    
+
 #ifndef ZC_HISTORY_H_
 #define ZC_HISTORY_H_
 
 #include <stdexcept>
-#include <unordered_map>
+#include <unordered_map> 
 #include <boost/foreach.hpp>
+#include <array>
+#include <cstdint>
 
 #include "serialize.h"
 #include "streams.h"
 #include "uint256.h"
-
 #include "librustzcash.h"
 
-#define NODE_V1_SERIALIZED_LENGTH 171
-#define NODE_SERIALIZED_LENGTH 244
-#define ENTRY_SERIALIZED_LENGTH (NODE_SERIALIZED_LENGTH + 9)
+// Use constexpr for constants for better type safety and compile-time evaluation
+constexpr size_t NODE_V1_SERIALIZED_LENGTH = 171;
+constexpr size_t NODE_SERIALIZED_LENGTH = 244;
+constexpr size_t ENTRY_SERIALIZED_LENGTH = NODE_SERIALIZED_LENGTH + 9;
 
-typedef std::array<unsigned char, NODE_SERIALIZED_LENGTH> HistoryNode;
-typedef std::array<unsigned char, ENTRY_SERIALIZED_LENGTH> HistoryEntry;
+using HistoryNode = std::array<unsigned char, NODE_SERIALIZED_LENGTH>;
+using HistoryEntry = std::array<unsigned char, ENTRY_SERIALIZED_LENGTH>;
 
 namespace libzcash {
 
-typedef uint64_t HistoryIndex;
+// Renamed to CamelCase for consistency with naming conventions
+using HistoryIndex = uint64_t;
 
 class HistoryCache {
 public:
-    // updates to the persistent(db) layer
+    // Updates to the persistent(db) layer
     std::unordered_map<HistoryIndex, HistoryNode> appends;
-    // current length of the history
-    HistoryIndex length;
-    // how much back into the old state current update state
-    // goes
-    HistoryIndex updateDepth;
-    // current root of the history
-    uint256 root;
-    // current epoch of this history state
-    uint32_t epoch;
+    // Current length of the history
+    HistoryIndex length{0};
+    // Depth into the old state for current updates
+    HistoryIndex updateDepth{0};
+    // Current root of the history
+    uint256 root{};
+    // Current epoch of this history state
+    uint32_t epoch{0};
 
-    HistoryCache(HistoryIndex initialLength, uint256 initialRoot, uint32_t initialEpoch) :
-        length(initialLength), updateDepth(initialLength), root(initialRoot), epoch(initialEpoch) { };
+    // Constructor with default initialization
+    HistoryCache(HistoryIndex initialLength = 0, const uint256& initialRoot = uint256(), uint32_t initialEpoch = 0)
+        : length(initialLength), updateDepth(initialLength), root(initialRoot), epoch(initialEpoch) {}
 
-    HistoryCache() { }
+    // Extend current history update by one history node.
+    void Extend(const HistoryNode& leaf);
 
-    // Extends current history update by one history node.
-    void Extend(const HistoryNode &leaf);
-
-    // Truncates current history to the new length.
+    // Truncate history to the new length.
     void Truncate(HistoryIndex newLength);
 };
 
-// New V1 history node with metadata based on block state.
+// V1 history node creation with metadata based on block state
 HistoryNode NewV1Leaf(
-    uint256 commitment,
+    const uint256& commitment,
     uint32_t time,
     uint32_t target,
-    uint256 saplingRoot,
-    uint256 totalWork,
+    const uint256& saplingRoot,
+    const uint256& totalWork,
     uint64_t height,
     uint64_t saplingTxCount
 );
 
-// New V2 history node with metadata based on block state.
+// V2 history node creation with metadata based on block state
 HistoryNode NewV2Leaf(
-    uint256 commitment,
+    const uint256& commitment,
     uint32_t time,
     uint32_t target,
-    uint256 saplingRoot,
-    uint256 orchardRoot,
-    uint256 totalWork,
+    const uint256& saplingRoot,
+    const uint256& orchardRoot,
+    const uint256& totalWork,
     uint64_t height,
     uint64_t saplingTxCount,
     uint64_t orchardTxCount
 );
 
 // Convert history node to tree node (with children references)
-HistoryEntry NodeToEntry(const HistoryNode node, uint32_t left, uint32_t right);
+HistoryEntry NodeToEntry(const HistoryNode& node, uint32_t left, uint32_t right);
 
 // Convert history node to leaf node (end nodes without children)
-HistoryEntry LeafToEntry(const HistoryNode node);
+HistoryEntry LeafToEntry(const HistoryNode& node);
 
 // Returns true if this epoch used the V1 history tree format.
 bool IsV1HistoryTree(uint32_t epochId);
 
-}
+} // namespace libzcash
 
-typedef libzcash::HistoryCache HistoryCache;
-typedef libzcash::HistoryIndex HistoryIndex;
+// Type aliases for external usage
+using HistoryCache = libzcash::HistoryCache;
+using HistoryIndex = libzcash::HistoryIndex;
 
 #endif /* ZC_HISTORY_H_ */
