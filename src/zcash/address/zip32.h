@@ -1,4 +1,5 @@
 // Copyright (c) 2018 The Zcash developers
+// Copyright (c) 2021-2024 The Pirate developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -6,18 +7,18 @@
 #define ZCASH_ZIP32_H
 
 #include "serialize.h"
-#include "support/allocators/secure.h"
 #include "uint256.h"
 #include "zcash/address/sapling.hpp"
 #include "zcash/address/pirate_orchard.hpp"
 
 #include <optional>
+#include <array>
 
-const uint32_t HARDENED_KEY_LIMIT = 0x80000000;
-const size_t SAPLING_ZIP32_XFVK_SIZE = 169;
-const size_t SAPLING_ZIP32_XSK_SIZE = 169;
-const size_t SAPLING_ZIP32_DXFVK_SIZE = 180;
-const size_t SAPLING_ZIP32_DXSK_SIZE = 180;
+constexpr uint32_t HARDENED_KEY_LIMIT = 0x80000000;
+constexpr size_t SAPLING_ZIP32_XFVK_SIZE = 169;
+constexpr size_t SAPLING_ZIP32_XSK_SIZE = 169;
+constexpr size_t SAPLING_ZIP32_DXFVK_SIZE = 180;
+constexpr size_t SAPLING_ZIP32_DXSK_SIZE = 180;
 
 typedef std::vector<unsigned char, secure_allocator<unsigned char>> RawHDSeed;
 
@@ -26,52 +27,43 @@ private:
     RawHDSeed seed;
 
 public:
-    HDSeed() {}
-    HDSeed(RawHDSeed& seedIn) : seed(seedIn) {}
+    HDSeed() = default;
+    explicit HDSeed(const RawHDSeed& seedIn) : seed(seedIn) {}
+    explicit HDSeed(RawHDSeed&& seedIn) noexcept : seed(std::move(seedIn)) {}
 
     static HDSeed Random(size_t len = 32);
-    static HDSeed RestoreFromPhrase(std::string &phrase);
-    bool IsValidPhrase(std::string &phrase);
-    bool IsNull() const { return seed.empty(); };
-    void GetPhrase(std::string &phrase);
+    static HDSeed RestoreFromPhrase(const std::string& phrase);
+    bool IsValidPhrase(const std::string& phrase) const;
+    bool IsNull() const { return seed.empty(); }
+    void GetPhrase(std::string& phrase) const;
     uint256 Fingerprint() const;
     uint256 EncryptionFingerprint() const;
-    RawHDSeed RawSeed() const { return seed; }
+    const RawHDSeed& RawSeed() const { return seed; }
 
-    friend bool operator==(const HDSeed& a, const HDSeed& b)
-    {
+    friend bool operator==(const HDSeed& a, const HDSeed& b) {
         return a.seed == b.seed;
     }
 
-    friend bool operator!=(const HDSeed& a, const HDSeed& b)
-    {
+    friend bool operator!=(const HDSeed& a, const HDSeed& b) {
         return !(a == b);
     }
 };
 
-// This is not part of ZIP 32, but is here because it's linked to the HD seed.
-uint256 ovkForShieldingFromTaddr(HDSeed& seed);
+// This is not part of ZIP 32 but is linked to the HD seed.
+uint256 ovkForShieldingFromTaddr(const HDSeed& seed);
 
 namespace libzcash {
 
 typedef uint32_t AccountId;
 
-/**
- * The account identifier used for HD derivation of
- * transparent and Sapling addresses via the legacy
- * `getnewaddress` and `z_getnewaddress` code paths,
- */
-const AccountId ZCASH_LEGACY_ACCOUNT = HARDENED_KEY_LIMIT - 1;
+constexpr AccountId ZCASH_LEGACY_ACCOUNT = HARDENED_KEY_LIMIT - 1;
 
-/**
- * 88-bit diversifier index. This would ideally derive from base_uint
- * but those values must have bit widths that are multiples of 32.
- */
 class diversifier_index_t : public base_blob<88> {
 public:
-    diversifier_index_t() {}
-    diversifier_index_t(const base_blob<88>& b) : base_blob<88>(b) {}
-    diversifier_index_t(uint64_t i): base_blob<88>() {
+    diversifier_index_t() = default;
+    explicit diversifier_index_t(const base_blob<88>& b) : base_blob<88>(b) {}
+    explicit diversifier_index_t(uint64_t i) : base_blob<88>() {
+        std::fill(data.begin(), data.end(), 0);
         data[0] = i & 0xFF;
         data[1] = (i >> 8) & 0xFF;
         data[2] = (i >> 16) & 0xFF;
@@ -83,10 +75,9 @@ public:
     }
     explicit diversifier_index_t(const std::vector<unsigned char>& vch) : base_blob<88>(vch) {}
 
-    static diversifier_index_t FromRawBytes(std::array<uint8_t, 11> bytes)
-    {
+    static diversifier_index_t FromRawBytes(const std::array<uint8_t, 11>& bytes) {
         diversifier_index_t buf;
-        std::memcpy(buf.begin(), bytes.data(), 11);
+        std::copy(bytes.begin(), bytes.end(), buf.begin());
         return buf;
     }
 
@@ -97,8 +88,7 @@ public:
                 return true; // no overflow
             }
         }
-
-        return false; //overflow
+        return false; // overflow
     }
 
     std::optional<diversifier_index_t> succ() const {
@@ -113,22 +103,14 @@ public:
     std::optional<uint32_t> ToTransparentChildIndex() const;
 
     friend bool operator<(const diversifier_index_t& a, const diversifier_index_t& b) {
-        for (int i = 10; i >= 0; i--) {
-            if (a.data[i] == b.data[i]) {
-                continue;
-            } else {
-                return a.data[i] < b.data[i];
-            }
-        }
-
-        return false;
+        return std::lexicographical_compare(a.data.rbegin(), a.data.rend(), b.data.rbegin(), b.data.rend());
     }
 };
 
 struct SaplingExtendedFullViewingKey {
-    uint8_t depth;
-    uint32_t parentFVKTag;
-    uint32_t childIndex;
+    uint8_t depth = 0;
+    uint32_t parentFVKTag = 0;
+    uint32_t childIndex = 0;
     uint256 chaincode;
     libzcash::SaplingFullViewingKey fvk;
     uint256 dk;
@@ -147,27 +129,18 @@ struct SaplingExtendedFullViewingKey {
 
     std::optional<SaplingExtendedFullViewingKey> Derive(uint32_t i) const;
 
-    // Returns the first index starting from j that generates a valid
-    // payment address, along with the corresponding address. Returns
-    // an error if the diversifier space is exhausted.
     std::optional<std::pair<diversifier_index_t, libzcash::SaplingPaymentAddress>>
         Address(diversifier_index_t j) const;
 
     libzcash::SaplingPaymentAddress DefaultAddress() const;
 
     friend inline bool operator==(const SaplingExtendedFullViewingKey& a, const SaplingExtendedFullViewingKey& b) {
-        return (
-            a.depth == b.depth &&
-            a.parentFVKTag == b.parentFVKTag &&
-            a.childIndex == b.childIndex &&
-            a.chaincode == b.chaincode &&
-            a.fvk == b.fvk &&
-            a.dk == b.dk);
+        return std::tie(a.depth, a.parentFVKTag, a.childIndex, a.chaincode, a.fvk, a.dk) ==
+               std::tie(b.depth, b.parentFVKTag, b.childIndex, b.chaincode, b.fvk, b.dk);
     }
+
     friend inline bool operator<(const SaplingExtendedFullViewingKey& a, const SaplingExtendedFullViewingKey& b) {
-        return (a.depth < b.depth ||
-            (a.depth == b.depth && a.childIndex < b.childIndex) ||
-            (a.depth == b.depth && a.childIndex == b.childIndex && a.fvk < b.fvk));
+        return std::tie(a.depth, a.childIndex, a.fvk) < std::tie(b.depth, b.childIndex, b.fvk);
     }
 };
 
@@ -185,9 +158,9 @@ struct SaplingDiversifiedExtendedFullViewingKey {
 };
 
 struct SaplingExtendedSpendingKey {
-    uint8_t depth;
-    uint32_t parentFVKTag;
-    uint32_t childIndex;
+    uint8_t depth = 0;
+    uint32_t parentFVKTag = 0;
+    uint32_t childIndex = 0;
     uint256 chaincode;
     libzcash::SaplingExpandedSpendingKey expsk;
     uint256 dk;
@@ -212,20 +185,13 @@ struct SaplingExtendedSpendingKey {
 
     libzcash::SaplingPaymentAddress DefaultAddress() const;
 
-    friend bool operator==(const SaplingExtendedSpendingKey& a, const SaplingExtendedSpendingKey& b)
-    {
-        return a.depth == b.depth &&
-            a.parentFVKTag == b.parentFVKTag &&
-            a.childIndex == b.childIndex &&
-            a.chaincode == b.chaincode &&
-            a.expsk == b.expsk &&
-            a.dk == b.dk;
+    friend bool operator==(const SaplingExtendedSpendingKey& a, const SaplingExtendedSpendingKey& b) {
+        return std::tie(a.depth, a.parentFVKTag, a.childIndex, a.chaincode, a.expsk, a.dk) ==
+               std::tie(b.depth, b.parentFVKTag, b.childIndex, b.chaincode, b.expsk, b.dk);
     }
 
     friend inline bool operator<(const SaplingExtendedSpendingKey& a, const SaplingExtendedSpendingKey& b) {
-        return (a.depth < b.depth ||
-            (a.depth == b.depth && a.childIndex < b.childIndex) ||
-            (a.depth == b.depth && a.childIndex == b.childIndex && a.expsk < b.expsk));
+        return std::tie(a.depth, a.childIndex, a.expsk) < std::tie(b.depth, b.childIndex, b.expsk);
     }
 };
 
@@ -243,9 +209,9 @@ struct SaplingDiversifiedExtendedSpendingKey {
 };
 
 struct OrchardExtendedFullViewingKeyPirate {
-    uint8_t depth;
-    uint32_t parentFVKTag;
-    uint32_t childIndex;
+    uint8_t depth = 0;
+    uint32_t parentFVKTag = 0;
+    uint32_t childIndex = 0;
     uint256 chaincode;
     libzcash::OrchardFullViewingKeyPirate fvk;
 
@@ -261,24 +227,19 @@ struct OrchardExtendedFullViewingKeyPirate {
     }
 
     friend inline bool operator==(const OrchardExtendedFullViewingKeyPirate& a, const OrchardExtendedFullViewingKeyPirate& b) {
-        return (
-            a.depth == b.depth &&
-            a.parentFVKTag == b.parentFVKTag &&
-            a.childIndex == b.childIndex &&
-            a.chaincode == b.chaincode &&
-            a.fvk == b.fvk);
+        return std::tie(a.depth, a.parentFVKTag, a.childIndex, a.chaincode, a.fvk) ==
+               std::tie(b.depth, b.parentFVKTag, b.childIndex, b.chaincode, b.fvk);
     }
+
     friend inline bool operator<(const OrchardExtendedFullViewingKeyPirate& a, const OrchardExtendedFullViewingKeyPirate& b) {
-        return (a.depth < b.depth ||
-            (a.depth == b.depth && a.childIndex < b.childIndex) ||
-            (a.depth == b.depth && a.childIndex == b.childIndex && a.fvk < b.fvk));
+        return std::tie(a.depth, a.childIndex, a.fvk) < std::tie(b.depth, b.childIndex, b.fvk);
     }
 };
 
 struct OrchardExtendedSpendingKeyPirate {
-    uint8_t depth;
-    uint32_t parentFVKTag;
-    uint32_t childIndex;
+    uint8_t depth = 0;
+    uint32_t parentFVKTag = 0;
+    uint32_t childIndex = 0;
     uint256 chaincode;
     libzcash::OrchardSpendingKeyPirate sk;
 
@@ -294,25 +255,21 @@ struct OrchardExtendedSpendingKeyPirate {
     }
 
     static OrchardExtendedSpendingKeyPirate Master(const HDSeed& seed, bool bip39Enabled = true);
+
     std::optional<OrchardExtendedSpendingKeyPirate> DeriveChild(uint32_t bip44CoinType, uint32_t account) const;
+
     std::optional<OrchardExtendedFullViewingKeyPirate> GetXFVK() const;
 
-    friend bool operator==(const OrchardExtendedSpendingKeyPirate& a, const OrchardExtendedSpendingKeyPirate& b)
-    {
-        return a.depth == b.depth &&
-            a.parentFVKTag == b.parentFVKTag &&
-            a.childIndex == b.childIndex &&
-            a.chaincode == b.chaincode &&
-            a.sk == b.sk;
+    friend bool operator==(const OrchardExtendedSpendingKeyPirate& a, const OrchardExtendedSpendingKeyPirate& b) {
+        return std::tie(a.depth, a.parentFVKTag, a.childIndex, a.chaincode, a.sk) ==
+               std::tie(b.depth, b.parentFVKTag, b.childIndex, b.chaincode, b.sk);
     }
 
     friend inline bool operator<(const OrchardExtendedSpendingKeyPirate& a, const OrchardExtendedSpendingKeyPirate& b) {
-        return (a.depth < b.depth ||
-            (a.depth == b.depth && a.childIndex < b.childIndex) ||
-            (a.depth == b.depth && a.childIndex == b.childIndex && a.sk < b.sk));
+        return std::tie(a.depth, a.childIndex, a.sk) < std::tie(b.depth, b.childIndex, b.sk);
     }
 };
 
-}
+} // namespace libzcash
 
 #endif // ZCASH_ZIP32_H
