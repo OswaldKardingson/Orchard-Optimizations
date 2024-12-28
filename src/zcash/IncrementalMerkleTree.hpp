@@ -1,10 +1,14 @@
+// Copyright (c) 2021-2024 The Pirate developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
 #ifndef ZC_INCREMENTALMERKLETREE_H_
 #define ZC_INCREMENTALMERKLETREE_H_
 
 #include <array>
-#include <deque>
+#include <vector>
 #include <optional>
-#include <boost/static_assert.hpp>
+#include <cassert>
 
 #include "uint256.h"
 #include "serialize.h"
@@ -20,27 +24,21 @@
 
 namespace libzcash {
 
-typedef uint64_t SubtreeIndex;
-typedef std::array<uint8_t, 32> SubtreeRoot;
-static const uint8_t TRACKED_SUBTREE_HEIGHT = 16;
+using SubtreeIndex = uint64_t;
+using SubtreeRoot = std::array<uint8_t, 32>;
+constexpr uint8_t TRACKED_SUBTREE_HEIGHT = 16;
 
 class LatestSubtree {
-    public:
-
-    //! Version of this structure for extensibility purposes
+public:
     uint8_t leadbyte = 0x00;
-    //! The index of the latest complete subtree
     SubtreeIndex index;
-    //! The latest complete subtree root at level TRACKED_SUBTREE_HEIGHT
     SubtreeRoot root;
-    //! The height of the block that contains the note commitment that is
-    //! the rightmost leaf of the most recently completed subtree.
     int nHeight;
 
-    LatestSubtree() : nHeight(0) { }
+    LatestSubtree() : index(0), root{}, nHeight(0) {}
 
-    LatestSubtree(SubtreeIndex index, SubtreeRoot root, int nHeight)
-        : index(index), root(root), nHeight(nHeight) { }
+    LatestSubtree(SubtreeIndex idx, SubtreeRoot rt, int height)
+        : index(idx), root(rt), nHeight(height) {}
 
     ADD_SERIALIZE_METHODS;
 
@@ -54,20 +52,15 @@ class LatestSubtree {
 };
 
 class SubtreeData {
-    public:
-
-    //! Version of this structure for extensibility purposes
+public:
     uint8_t leadbyte = 0x00;
-    //! The root of the subtree at level TRACKED_SUBTREE_HEIGHT
     SubtreeRoot root;
-    //! The height of the block that contains the note commitment
-    //! that completed this subtree.
     int nHeight;
 
-    SubtreeData() : nHeight(0) { }
+    SubtreeData() : root{}, nHeight(0) {}
 
-    SubtreeData(SubtreeRoot root, int nHeight)
-        : root(root), nHeight(nHeight) { }
+    SubtreeData(SubtreeRoot rt, int height)
+        : root(rt), nHeight(height) {}
 
     ADD_SERIALIZE_METHODS;
 
@@ -84,6 +77,11 @@ public:
     std::vector<std::vector<bool>> authentication_path;
     std::vector<bool> index;
 
+    MerklePath() = default;
+
+    MerklePath(std::vector<std::vector<bool>> auth_path, std::vector<bool> idx)
+        : authentication_path(std::move(auth_path)), index(std::move(idx)) {}
+
     ADD_SERIALIZE_METHODS;
 
     template <typename Stream, typename Operation>
@@ -93,18 +91,21 @@ public:
         if (ser_action.ForRead()) {
             READWRITE(pathBytes);
             READWRITE(indexInt);
-            MerklePath &us = *(const_cast<MerklePath*>(this));
-            for (size_t i = 0; i < pathBytes.size(); i++) {
-                us.authentication_path.push_back(convertBytesVectorToVector(pathBytes[i]));
-                us.index.push_back((indexInt >> ((pathBytes.size() - 1) - i)) & 1);
+            authentication_path.clear();
+            index.clear();
+
+            for (size_t i = 0; i < pathBytes.size(); ++i) {
+                authentication_path.emplace_back(convertBytesVectorToVector(pathBytes[i]));
+                index.push_back((indexInt >> ((pathBytes.size() - 1) - i)) & 1);
             }
         } else {
             assert(authentication_path.size() == index.size());
             pathBytes.resize(authentication_path.size());
-            for (size_t i = 0; i < authentication_path.size(); i++) {
-                pathBytes[i].resize((authentication_path[i].size()+7)/8);
-                for (unsigned int p = 0; p < authentication_path[i].size(); p++) {
-                    pathBytes[i][p / 8] |= authentication_path[i][p] << (7-(p % 8));
+            for (size_t i = 0; i < authentication_path.size(); ++i) {
+                auto& pathVec = authentication_path[i];
+                pathBytes[i].resize((pathVec.size() + 7) / 8);
+                for (size_t p = 0; p < pathVec.size(); ++p) {
+                    pathBytes[i][p / 8] |= pathVec[p] << (7 - (p % 8));
                 }
             }
             indexInt = convertVectorToInt(index);
@@ -113,80 +114,65 @@ public:
         }
     }
 
-    MerklePath() { }
-
-    MerklePath(std::vector<std::vector<bool>> authentication_path, std::vector<bool> index)
-    : authentication_path(authentication_path), index(index) { }
-
-    uint64_t position() {
-        return convertVectorToInt(index);
-    }
+    uint64_t position() const { return convertVectorToInt(index); }
 };
 
-template<size_t Depth, typename Hash>
+} // namespace libzcash
+
+#endif // ZC_INCREMENTALMERKLETREE_H_
+
+namespace libzcash {
+
+template <size_t Depth, typename Hash>
 class EmptyMerkleRoots {
 public:
     EmptyMerkleRoots() {
-        empty_roots.at(0) = Hash::uncommitted();
-        for (size_t d = 1; d <= Depth; d++) {
-            empty_roots.at(d) = Hash::combine(empty_roots.at(d-1), empty_roots.at(d-1), d-1);
+        empty_roots[0] = Hash::uncommitted();
+        for (size_t d = 1; d <= Depth; ++d) {
+            empty_roots[d] = Hash::combine(empty_roots[d - 1], empty_roots[d - 1], d - 1);
         }
     }
-    Hash empty_root(size_t depth) {
-        return empty_roots.at(depth);
+
+    Hash empty_root(size_t depth) const {
+        assert(depth <= Depth);
+        return empty_roots[depth];
     }
+
     template <size_t D, typename H>
-    friend bool operator==(const EmptyMerkleRoots<D, H>& a,
-                           const EmptyMerkleRoots<D, H>& b);
+    friend bool operator==(const EmptyMerkleRoots<D, H>& a, const EmptyMerkleRoots<D, H>& b);
+
 private:
-    std::array<Hash, Depth+1> empty_roots;
+    std::array<Hash, Depth + 1> empty_roots;
 };
 
-template<size_t Depth, typename Hash>
-bool operator==(const EmptyMerkleRoots<Depth, Hash>& a,
-                const EmptyMerkleRoots<Depth, Hash>& b) {
+template <size_t Depth, typename Hash>
+bool operator==(const EmptyMerkleRoots<Depth, Hash>& a, const EmptyMerkleRoots<Depth, Hash>& b) {
     return a.empty_roots == b.empty_roots;
 }
 
-template<size_t Depth, typename Hash>
+template <size_t Depth, typename Hash>
 class IncrementalWitness;
 
-template<size_t Depth, typename Hash>
+template <size_t Depth, typename Hash>
 class IncrementalMerkleTree {
-
-friend class IncrementalWitness<Depth, Hash>;
+    friend class IncrementalWitness<Depth, Hash>;
 
 public:
-    BOOST_STATIC_ASSERT(Depth >= 1);
+    static_assert(Depth >= 1, "Depth must be at least 1");
 
-    IncrementalMerkleTree() { }
+    IncrementalMerkleTree() = default;
 
     size_t DynamicMemoryUsage() const {
-        return 32 + // left
-               32 + // right
-               parents.size() * 32; // parents
+        return sizeof(left) + sizeof(right) + (parents.size() * sizeof(Hash));
     }
 
-    //! Returns the number of (filled) leaves present in this tree, or
-    //! in other words, the 0-indexed position that the next leaf
-    //! added to the tree will occupy.
     size_t size() const;
-
-    //! Returns the current 2^TRACKED_SUBTREE_HEIGHT subtree index
-    //! that this tree is currently on. Specifically, a leaf appended
-    //! at this point will be located in the 2^TRACKED_SUBTREE_HEIGHT
-    //! subtree with the index returned by this function.
     SubtreeIndex current_subtree_index() const;
+    std::optional<Hash> complete_subtree_root() const;
 
-    //! If the last leaf appended to this tree completed a
-    //! 2^TRACKED_SUBTREE_HEIGHT subtree, this function will return
-    //! the 2^TRACKED_SUBTREE_HEIGHT root of that subtree. Otherwise,
-    //! this will return nullopt.
-    Hash complete_subtree_root() const;
-
-    void append(Hash obj);
+    void append(const Hash& obj);
     Hash root() const {
-        return root(Depth, std::deque<Hash>());
+        return root(Depth, std::deque<Hash>{});
     }
     Hash last() const;
 
@@ -201,7 +187,6 @@ public:
         READWRITE(left);
         READWRITE(right);
         READWRITE(parents);
-
         wfcheck();
     }
 
@@ -217,17 +202,16 @@ private:
     static EmptyMerkleRoots<Depth, Hash> emptyroots;
     std::optional<Hash> left;
     std::optional<Hash> right;
-
-    // Collapsed "left" subtrees ordered toward the root of the tree.
     std::vector<std::optional<Hash>> parents;
-    MerklePath path(std::deque<Hash> filler_hashes = std::deque<Hash>()) const;
-    Hash root(size_t depth, std::deque<Hash> filler_hashes = std::deque<Hash>()) const;
+
+    MerklePath path(std::deque<Hash> filler_hashes = {}) const;
+    Hash root(size_t depth, std::deque<Hash> filler_hashes = {}) const;
     bool is_complete(size_t depth = Depth) const;
     size_t next_depth(size_t skip) const;
     void wfcheck() const;
 };
 
-template<size_t Depth, typename Hash>
+template <size_t Depth, typename Hash>
 bool operator==(const IncrementalMerkleTree<Depth, Hash>& a,
                 const IncrementalMerkleTree<Depth, Hash>& b) {
     return (a.emptyroots == b.emptyroots &&
@@ -236,20 +220,21 @@ bool operator==(const IncrementalMerkleTree<Depth, Hash>& a,
             a.parents == b.parents);
 }
 
+} // namespace libzcash
+
+namespace libzcash {
+
 template <size_t Depth, typename Hash>
 class IncrementalWitness {
-friend class IncrementalMerkleTree<Depth, Hash>;
+    friend class IncrementalMerkleTree<Depth, Hash>;
 
 public:
-    // Required for Unserialize()
-    IncrementalWitness() {}
+    IncrementalWitness() = default;
 
     MerklePath path() const {
         return tree.path(partial_path());
     }
 
-    // Return the element being witnessed (should be a note
-    // commitment!)
     Hash element() const {
         return tree.last();
     }
@@ -262,7 +247,7 @@ public:
         return tree.root(Depth, partial_path());
     }
 
-    void append(Hash obj);
+    void append(const Hash& obj);
 
     ADD_SERIALIZE_METHODS;
 
@@ -284,11 +269,12 @@ private:
     std::vector<Hash> filled;
     std::optional<IncrementalMerkleTree<Depth, Hash>> cursor;
     size_t cursor_depth = 0;
+
     std::deque<Hash> partial_path() const;
-    IncrementalWitness(IncrementalMerkleTree<Depth, Hash> tree) : tree(tree) {}
+    IncrementalWitness(const IncrementalMerkleTree<Depth, Hash>& tree) : tree(tree) {}
 };
 
-template<size_t Depth, typename Hash>
+template <size_t Depth, typename Hash>
 bool operator==(const IncrementalWitness<Depth, Hash>& a,
                 const IncrementalWitness<Depth, Hash>& b) {
     return (a.tree == b.tree &&
@@ -299,8 +285,8 @@ bool operator==(const IncrementalWitness<Depth, Hash>& a,
 
 class SHA256Compress : public uint256 {
 public:
-    SHA256Compress() : uint256() {}
-    SHA256Compress(uint256 contents) : uint256(contents) { }
+    SHA256Compress() = default;
+    explicit SHA256Compress(uint256 contents) : uint256(std::move(contents)) {}
 
     static SHA256Compress combine(
         const SHA256Compress& a,
@@ -315,8 +301,8 @@ public:
 
 class PedersenHash : public uint256 {
 public:
-    PedersenHash() : uint256() {}
-    PedersenHash(uint256 contents) : uint256(contents) { }
+    PedersenHash() = default;
+    explicit PedersenHash(uint256 contents) : uint256(std::move(contents)) {}
 
     static PedersenHash combine(
         const PedersenHash& a,
@@ -327,11 +313,12 @@ public:
     static PedersenHash uncommitted();
 };
 
-template<size_t Depth, typename Hash>
+template <size_t Depth, typename Hash>
 EmptyMerkleRoots<Depth, Hash> IncrementalMerkleTree<Depth, Hash>::emptyroots;
 
-} // end namespace `libzcash`
+} // namespace libzcash
 
+// Typedefs for specific IncrementalMerkleTree and IncrementalWitness configurations.
 typedef libzcash::IncrementalMerkleTree<INCREMENTAL_MERKLE_TREE_DEPTH, libzcash::SHA256Compress> SproutMerkleTree;
 typedef libzcash::IncrementalMerkleTree<INCREMENTAL_MERKLE_TREE_DEPTH_TESTING, libzcash::SHA256Compress> SproutTestingMerkleTree;
 
@@ -344,41 +331,38 @@ typedef libzcash::IncrementalMerkleTree<INCREMENTAL_MERKLE_TREE_DEPTH_TESTING, l
 typedef libzcash::IncrementalWitness<SAPLING_INCREMENTAL_MERKLE_TREE_DEPTH, libzcash::PedersenHash> SaplingWitness;
 typedef libzcash::IncrementalWitness<INCREMENTAL_MERKLE_TREE_DEPTH_TESTING, libzcash::PedersenHash> SaplingTestingWitness;
 
-class SaplingWallet;
-class SaplingMerkleFrontierLegacySer;
+} // namespace libzcash
 
-class SaplingMerkleFrontier
-{
+class SaplingMerkleFrontier {
 private:
-    /// An incremental PedersenHash tree. Memory is allocated by Rust.
     rust::Box<merkle_frontier::SaplingFrontier> inner;
 
     friend class SaplingWallet;
     friend class SaplingMerkleFrontierLegacySer;
+
 public:
     SaplingMerkleFrontier() : inner(merkle_frontier::new_sapling()) {}
 
-    SaplingMerkleFrontier(SaplingMerkleFrontier&& frontier) : inner(std::move(frontier.inner)) {}
+    SaplingMerkleFrontier(SaplingMerkleFrontier&& frontier) noexcept : inner(std::move(frontier.inner)) {}
 
-    SaplingMerkleFrontier(const SaplingMerkleFrontier& frontier) :
-        inner(frontier.inner->box_clone()) {}
+    SaplingMerkleFrontier(const SaplingMerkleFrontier& frontier)
+        : inner(frontier.inner->box_clone()) {}
 
-    SaplingMerkleFrontier& operator=(SaplingMerkleFrontier&& frontier)
-    {
+    SaplingMerkleFrontier& operator=(SaplingMerkleFrontier&& frontier) noexcept {
         if (this != &frontier) {
             inner = std::move(frontier.inner);
         }
         return *this;
     }
-    SaplingMerkleFrontier& operator=(const SaplingMerkleFrontier& frontier)
-    {
+
+    SaplingMerkleFrontier& operator=(const SaplingMerkleFrontier& frontier) {
         if (this != &frontier) {
             inner = frontier.inner->box_clone();
         }
         return *this;
     }
 
-    template<typename Stream>
+    template <typename Stream>
     void Serialize(Stream& s) const {
         try {
             inner->serialize(*ToRustStream(s));
@@ -387,7 +371,7 @@ public:
         }
     }
 
-    template<typename Stream>
+    template <typename Stream>
     void Unserialize(Stream& s) {
         try {
             inner = merkle_frontier::parse_sapling(*ToRustStream(s));
@@ -404,7 +388,7 @@ public:
         return inner->append_bundle(bundle.GetDetails());
     }
 
-    const uint256 root() const {
+    uint256 root() const {
         return uint256::FromRawBytes(inner->root());
     }
 
@@ -421,57 +405,36 @@ public:
     }
 };
 
-class SaplingMerkleFrontierLegacySer {
+class OrchardMerkleFrontier {
 private:
-    const SaplingMerkleFrontier& frontier;
-public:
-    SaplingMerkleFrontierLegacySer(const SaplingMerkleFrontier& frontier): frontier(frontier) {}
-
-    template<typename Stream>
-    void Serialize(Stream& s) const {
-        try {
-            frontier.inner->serialize_legacy(*ToRustStream(s));
-        } catch (const std::exception& e) {
-            throw std::ios_base::failure(e.what());
-        }
-    }
-};
-
-class OrchardWallet;
-class OrchardMerkleFrontierLegacySer;
-
-class OrchardMerkleFrontier
-{
-private:
-    /// An incremental Sinsemilla tree. Memory is allocated by Rust.
     rust::Box<merkle_frontier::OrchardFrontier> inner;
 
     friend class OrchardWallet;
     friend class OrchardMerkleFrontierLegacySer;
+
 public:
     OrchardMerkleFrontier() : inner(merkle_frontier::new_orchard()) {}
 
-    OrchardMerkleFrontier(OrchardMerkleFrontier&& frontier) : inner(std::move(frontier.inner)) {}
+    OrchardMerkleFrontier(OrchardMerkleFrontier&& frontier) noexcept : inner(std::move(frontier.inner)) {}
 
-    OrchardMerkleFrontier(const OrchardMerkleFrontier& frontier) :
-        inner(frontier.inner->box_clone()) {}
+    OrchardMerkleFrontier(const OrchardMerkleFrontier& frontier)
+        : inner(frontier.inner->box_clone()) {}
 
-    OrchardMerkleFrontier& operator=(OrchardMerkleFrontier&& frontier)
-    {
+    OrchardMerkleFrontier& operator=(OrchardMerkleFrontier&& frontier) noexcept {
         if (this != &frontier) {
             inner = std::move(frontier.inner);
         }
         return *this;
     }
-    OrchardMerkleFrontier& operator=(const OrchardMerkleFrontier& frontier)
-    {
+
+    OrchardMerkleFrontier& operator=(const OrchardMerkleFrontier& frontier) {
         if (this != &frontier) {
             inner = frontier.inner->box_clone();
         }
         return *this;
     }
 
-    template<typename Stream>
+    template <typename Stream>
     void Serialize(Stream& s) const {
         try {
             inner->serialize(*ToRustStream(s));
@@ -480,7 +443,7 @@ public:
         }
     }
 
-    template<typename Stream>
+    template <typename Stream>
     void Unserialize(Stream& s) {
         try {
             inner = merkle_frontier::parse_orchard(*ToRustStream(s));
@@ -497,7 +460,7 @@ public:
         return inner->append_bundle(bundle.GetDetails());
     }
 
-    const uint256 root() const {
+    uint256 root() const {
         return uint256::FromRawBytes(inner->root());
     }
 
@@ -514,20 +477,6 @@ public:
     }
 };
 
-class OrchardMerkleFrontierLegacySer {
-private:
-    const OrchardMerkleFrontier& frontier;
-public:
-    OrchardMerkleFrontierLegacySer(const OrchardMerkleFrontier& frontier): frontier(frontier) {}
+} // namespace libzcash
 
-    template<typename Stream>
-    void Serialize(Stream& s) const {
-        try {
-            frontier.inner->serialize_legacy(*ToRustStream(s));
-        } catch (const std::exception& e) {
-            throw std::ios_base::failure(e.what());
-        }
-    }
-};
-
-#endif /* ZC_INCREMENTALMERKLETREE_H_ */
+#endif // ZC_INCREMENTALMERKLETREE_H_
